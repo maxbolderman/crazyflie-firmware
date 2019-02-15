@@ -43,8 +43,10 @@ static uint32_t magAccumulatorCount;        // Count variable, number of samples
 static uint32_t thrustAccumulatorCount;     // Count variable, number of samples of which thrust is summed
 // Extra variables used in the Unscented Kalman Filter
 static const uint32_t n = 12;               // Dimension of dynamical model (used by Bolderman)
-// When extending, change nout to 9 (adding the position measurement)
-static const uint32_t nout = 6;             // Dimension of output measurements (used by Bolderman); (acc and gyro)
+static bool positionmeasurement = false;    // Boolean variable stating whether there is observation of position (0 = no position measurement, 1 = position measurement)
+// Output = [ax, ay, az] --> acceleration in body coordinates
+// Output = [x, y, z, ax, ay, az] --> position in global coordinates and acceleration in body coordinates
+static const uint32_t nout = 3;             // Dimension of output measurements (used by Bolderman); (acc and gyro)
 static const uint32_t nsigma = 2*n+1;       // Number of sigma points used for UKF
 static float alpha = 0.001;                 // Defines spread of sigma points
 static float kappa = 0;                     // Secondary scaling factor
@@ -63,10 +65,11 @@ static float[n] xpred;                      // Predicted state vector
 static float[nout] ypred;                   // Predicted output of outputted sigmapoints
 static float[n][n] Pxx;                     // Covariance of state Estimation
 static float[n][nout] Pxy;                  // Covariance of state - outputs
-static float[nou][nout] Pyy;                // Covariance of ouput
+static float[nout][nout] Pyy;               // Covariance of ouput
+static float[n][nout] k;                    // Kalman gain (Pxy * inv(Pyy))
 static uint32_t tick;                       // Tick variable used for updating state
 static bool fly = false;                    // Boolean stating that the crazyflie flying or not
-static float y[3][3];                       // Measurement vectors (just to show how to use static variables)
+static float y[3][4];                       // Measurement vectors (just to show how to use static variables)
 
 
 // Prototype of update function, which is used in estimatorBolderman function
@@ -142,6 +145,7 @@ void estimatorBolderman(state_t *state, sensorData_t *sensors, control_t *contro
     // Compute average thrust
     thrustAccumulator /= thrustAccumulatorCount;
     // When not flying, define when quadcopter lifts
+    // Afterwards landing can only be detected WHEN USING POSITION MEASUREMENTS
     if (fly == false) && (thrustAccumulator > GRAVITY_MAGNITUDE) {
       fly = true;
     }
@@ -152,7 +156,7 @@ void estimatorBolderman(state_t *state, sensorData_t *sensors, control_t *contro
     // This is where we perform the time-integration of the state estimate
     estimatorBoldermanUpdate(state, thrustAccumulator, &accAccumulator, &gyroAccumulator, &magAccumulator, dt);
 
-    // Reset the accumulators and counters
+    // Reset the accumulators and counters to be used next sample
     lastPrediction = osTick;                  // Last moment in time we made a prediction == now
     accAccumulator = (Axis3f){.axis={0}};     // Reset, so accumulator can start over
     accAccumulatorCount = 0;                  // Set to zero, so accumalation can start over
@@ -169,17 +173,26 @@ void estimatorBolderman(state_t *state, sensorData_t *sensors, control_t *contro
 static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, Axis3f *gyro, Axis3f *mag, float dt)
 {
   // Store the measuremets y1 y2 y3 as rows in a matrix
+  // Acceleration
   y[0][0] = acc->x;
   y[0][1] = acc->y;
   y[0][2] = acc->z;
-
+  // Magnetometer (not used in state estimation)
   y[1][0] = mag->x;
   y[1][1] = mag->y;
   y[1][2] = mag->z;
-
+  // Gyroscope
   y[2][0] = gyro->x;
   y[2][1] = gyro->y;
   y[2][2] = gyro->z;
+  // Position (if applicable) (not yet included)
+  /*
+  if (positionmeasurement == true) {
+    y[3][0] = ...;
+    y[3][1] = ...;
+    y[3][2] = ...;
+  }
+  */
 
   /* The following things are performed here:
       - a prediction of the state at the current moment is made, using the previous state (note that you need dt)
@@ -213,59 +226,73 @@ static void estimatorBoldermanPredict(float dt, float thrust)
   for (int ii = 0; ii<nsigma; ii++) {
     // Update the sigmapoints (discretized using forward euler)
     // Furthermore, note that the gyroscopic measurements are directly send through the dynamics as an input
-    if (fly) {    // When flying
-    sigmaXplus[0][ii] = sigmaX[0][ii] + dt*sigmaX[3][ii];
-    sigmaXplus[1][ii] = sigmaX[1][ii] + dt*sigmaX[4][ii];
-    sigmaXplus[2][ii] = sigmaX[2][ii] + dt*sigmaX[5][ii];
-    sigmaXplus[3][ii] = sigmaX[3][ii] + dt*thrust*(cos(sigmaX[11][ii])*sin(sigmaX[10][ii])*cos(sigmaX[9][ii]) + sin(sigmaX[9][ii])*sin(sigmaX[11][ii]));
-    sigmaXplus[4][ii] = sigmaX[4][ii] + dt*thrust*(sin(sigmaX[11][ii])*sin(sigmaX[10][ii])*cos(sigmaX[9][ii]) - sin(sigmaX[9][ii])*cos(sigmaX[11][ii]));
-    sigmaXplus[5][ii] = sigmaX[5][ii] + dt*(thrust*cos(sigmaX[10][ii])*cos(sigmaX[9][ii]) - g);
-    sigmaXplus[6][ii] = (sigmaXplus[3][ii]-sigmaX[3][ii])/dt;
-    sigmaXplus[7][ii] = (sigmaXplus[4][ii]-sigmaX[4][ii])/dt;
-    sigmaXplus[8][ii] = (sigmaXplus[5][ii]-sigmaX[5][ii])/dt;
-    sigmaXplus[9][ii] = sigmaX[9][ii]   + (dt/cos(sigmaX[10][ii]))*(cos(sigmaX[10][ii])*y[2][0] + sin(sigmaX[10][ii])*sin(sigmaX[9][ii])*y[2][1] + sin(sigmaX[10][ii])*cos(sigmaX[9][ii])*y[2][2]);
-    sigmaXplus[10][ii] = sigmaX[10][ii] + (dt/cos(sigmaX[10][ii]))*(cos(sigmaX[10][ii])*cos(sigmaX[9][ii])*y[2][1] - cos(sigmaX[10][ii])*sin(sigmaX[9][ii])*y[2][2]);
-    sigmaXplus[11][ii] = sigmaX[11][ii] + (dt/cos(sigmaX[10][ii]))*(sin(sigmaX[9][ii])*y[2][1] + cos(sigmaX[9][ii])*y[2][2]);
-  } else {      // When not flying
-    sigmaXplus[0][ii] = sigmaX[0][ii];
-    sigmaXplus[1][ii] = sigmaX[1][ii];
-    sigmaXplus[2][ii] = 0;
-    sigmaXplus[3][ii] = sigmaX[3][ii];
-    sigmaXplus[4][ii] = sigmaX[4][ii];
-    sigmaXplus[5][ii] = 0;
-    sigmaXplus[6][ii] = 0;
-    sigmaXplus[7][ii] = 0;
-    sigmaXplus[8][ii] = 0;
-    sigmaXplus[9][ii] = 0;
-    sigmaXplus[10][ii] = 0;
-    sigmaXplus[11][ii] = sigmaX[11][ii];
-  }
-    // Can only be done when position estimates are known
-    /*
-    if (sigmaXplus[2][ii] < 0) {
-      fly = false;
-      sigmaXplus[2][ii] = 0;
-      sigmaXplus[9][ii] = 0;
+    if (positionmeasurement == false) {
+      if (fly) {    // When flying
+        // Position
+        sigmaXplus[0][ii] = sigmaX[0][ii] + dt*sigmaX[3][ii];
+        sigmaXplus[1][ii] = sigmaX[1][ii] + dt*sigmaX[4][ii];
+        sigmaXplus[2][ii] = sigmaX[2][ii] + dt*sigmaX[5][ii];
+        // Velocity
+        sigmaXplus[3][ii] = sigmaX[3][ii] + dt*thrust*(cos(sigmaX[11][ii])*sin(sigmaX[10][ii])*cos(sigmaX[9][ii]) + sin(sigmaX[9][ii])*sin(sigmaX[11][ii]));
+        sigmaXplus[4][ii] = sigmaX[4][ii] + dt*thrust*(sin(sigmaX[11][ii])*sin(sigmaX[10][ii])*cos(sigmaX[9][ii]) - sin(sigmaX[9][ii])*cos(sigmaX[11][ii]));
+        sigmaXplus[5][ii] = sigmaX[5][ii] + dt*(thrust*cos(sigmaX[10][ii])*cos(sigmaX[9][ii]) - g);
+        // Acceleration (is the same as the additionstep above divided by dt)
+        sigmaXplus[6][ii] = (sigmaXplus[3][ii]-sigmaX[3][ii])/dt;
+        sigmaXplus[7][ii] = (sigmaXplus[4][ii]-sigmaX[4][ii])/dt;
+        sigmaXplus[8][ii] = (sigmaXplus[5][ii]-sigmaX[5][ii])/dt;
+        // Attitude
+        sigmaXplus[9][ii] = sigmaX[9][ii]   + (dt/cos(sigmaX[10][ii]))*(cos(sigmaX[10][ii])*y[2][0] + sin(sigmaX[10][ii])*sin(sigmaX[9][ii])*y[2][1] + sin(sigmaX[10][ii])*cos(sigmaX[9][ii])*y[2][2]);
+        sigmaXplus[10][ii] = sigmaX[10][ii] + (dt/cos(sigmaX[10][ii]))*(cos(sigmaX[10][ii])*cos(sigmaX[9][ii])*y[2][1] - cos(sigmaX[10][ii])*sin(sigmaX[9][ii])*y[2][2]);
+        sigmaXplus[11][ii] = sigmaX[11][ii] + (dt/cos(sigmaX[10][ii]))*(sin(sigmaX[9][ii])*y[2][1] + cos(sigmaX[9][ii])*y[2][2]);
+      } else {      // When not flying (NO SLIP ASSUMED, however position is already unrealiable)
+        // Position
+        sigmaXplus[0][ii] = sigmaX[0][ii];
+        sigmaXplus[1][ii] = sigmaX[1][ii];
+        sigmaXplus[2][ii] = 0;                // Quadcopter does not lift !
+        // Velocity
+        sigmaXplus[3][ii] = 0;
+        sigmaXplus[4][ii] = 0;
+        sigmaXplus[5][ii] = 0;
+        // Acceleration
+        sigmaXplus[6][ii] = 0;
+        sigmaXplus[7][ii] = 0;
+        sigmaXplus[8][ii] = 0;                // Hence no accelleration to (ground defines height)
+        // Attitude
+        sigmaXplus[9][ii] = 0;
+        sigmaXplus[10][ii] = 0;
+        sigmaXplus[11][ii] = sigmaX[11][ii];  // Yaw is not influenced by ground
+      }
+      // Determine the predicted output (using the state)
+      // Here only acceleration is measured (IN BODY COORDINATES)
+      sigmaYplus[0][ii] = cos(sigmaXplus[9][ii])*cos(sigmaXplus[11][ii])*sigmaXplus[6][ii] + sin(sigmaXplus[11][ii])*cos(sigmaXplus[9][ii])*sigmaXplus[7][ii] - sin(sigmaXplus[10][ii])*sigmaXplus[8][ii];
+      sigmaYplus[1][ii] = (cos(sigmaXplus[11][ii])*sin(sigmaXplus[10][ii])*sin(sigmaXplus[9][ii])-sin(sigmaXplus[11][ii])*cos(sigmaXplus[9][ii]))*sigmaXplus[6][ii] + (sin(sigmaXplus[11][ii])*sin(sigmaXplus[10][ii])*sin(sigmaXplus[9][ii])+cos(sigmaXplus[9][ii])*cos(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cos(sigmaXplus[10][ii])*sin(sigmaXplus[9][ii]))*sigmaXplus[8][ii];
+      sigmaYplus[2][ii] = (cos(sigmaXplus[11][ii])*sin(sigmaXplus[10][ii])*cos(sigmaXplus[9][ii])+sin(sigmaXplus[11][ii])*sin(sigmaXplus[9][ii]))*sigmaXplus[6][ii] + (sin(sigmaXplus[11][ii])*sin(sigmaXplus[10][ii])*cos(sigmaXplus[9][ii])-sin(sigmaXplus[9][ii])*cos(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cos(sigmaXplus[10][ii])*cos(sigmaXplus[9][ii]))*sigmaXplus[8][ii];
+    } else {
+    /* Define here the dynamics when position measurement is known (difference between not flying)
+       Not yet necessary, since position measurement is not yet included.
+       Here it is doable to detect landing
+       COULD BE DONE DIFFERENTLY (NOT ALL DYNAMICS SHOULD BE SPLITTED I THINK, COMBINE WITH ABOVE)*/
     }
-    */
   }
   // Calculate the predicted state and the predicted output
-  for (int ii=0; ii<n; ii++) {
+  for (int ii=0; ii<n; ii++) {      // Predicted state
     xpred[ii] = 0;
     for (int jj=0; jj<nsigma; jj++) {
       xpred[ii] += wm[jj]*sigmaXplus[ii][jj];
     }
   }
-  for (int ii=0; ii<nout; ii++) {
+  for (int ii=0; ii<nout; ii++) {   // Predicted output
     ypred[ii] = 0;
     for (int jj=0; jj<nsigma; jj++) {
       ypred[ii] += wm[jj]*sigmaYplus[ii][jj];
     }
   }
 
-  // Using the predicted state and the predicted output, calculate the covariances Pxy and Pyy
-  ///////////////////////////////
-
+  // Using the predicted state and the predicted output, calculate the covariances Pxx Pxy and Pyy
+  Pxx = .......;
+  Pxy = .......;
+  Pyy = .......;
+  K = .......;
 
 }
 
@@ -273,6 +300,18 @@ static void estimatorBoldermanPredict(float dt, float thrust)
 static void estimatorBoldermanDynMeas()
 {
   // Input here the UKF update...
+  // Slightly different depending on whether position information available
+  if (positionmeasurement == false) {
+    // Update using only acceleration measurements
+    for (int ii = 0; ii<n; ii++) {
+      x[ii] = xpred[ii] + (k[ii][0]*(y[0][0]-ypred[0]) + k[ii][1]*(y[0][1]-ypred[1]) + k[ii][2]*(y[0][2]-ypred[2]));
+    }
+  } else {
+    // Update using acceleration and position measurements
+    for (int ii = 0; ii<n; ii++) {
+      x[ii] = xpred[ii] + (k[ii][0]*(y[3][0]-ypred[0]) + k[ii][1]*(y[3][1]-ypred[1]) + k[ii][2]*(y[3][2]-ypred[2]) + k[ii][3]*(y[0][0]-ypred[3]) + k[ii][4]*(y[0][1]-ypred[4]) + k[ii][5]*(y[0][2]-ypred[5]) );
+    }
+  }
 }
 
 // Save the estimated state in the variable state
