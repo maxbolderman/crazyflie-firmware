@@ -22,6 +22,8 @@
 #define CRAZYFLIE_WEIGHT_grams (27.0f)    // Weight of crazyflie
 #define CONTROL_TO_ACC (GRAVITY_MAGNITUDE*60.0f/CRAZYFLIE_WEIGHT_grams/65536.0f)
                 // variable defining the factor from control input to acceleration
+#define MAX_ELEMENTS 12                   // Maximum number of elements for Cholesky decomposition
+
 
 /*******************************************************************************
 *   Internal variables for the estimator
@@ -52,6 +54,7 @@ static float alpha = 0.001;                 // Defines spread of sigma points
 static float kappa = 0;                     // Secondary scaling factor
 static float beta = 0;                      // Distributation parameter, gaussion := 2
 static float lambda = alpha*alpha*(n+kappa)-n; // Scaling parameter used for determining: Weights and Sigma points
+static const float upperbound = 10000;      // Upperbound for which we do not adjust pitch value
 static float[nsigma] wm;                    // Weights for calculating the mean (initialized in estimaterBoldermanInit())
 static float[nsigma] wc;                    // Weights for calculating the covariance (initialized in estimaterBoldermanInit())
 static float[n][n] q;                       // Covariance of process noise (zero-mean Gaussian distributed)
@@ -66,22 +69,38 @@ static float[nout] ypred;                   // Predicted output of outputted sig
 static float[n][n] Pxx;                     // Covariance of state Estimation
 static float[n][nout] Pxy;                  // Covariance of state - outputs
 static float[nout][nout] Pyy;               // Covariance of ouput
+static float[nout][nout] Pyyinv;            // Inverse of Pyy
 static float[n][nout] k;                    // Kalman gain (Pxy * inv(Pyy))
 static uint32_t tick;                       // Tick variable used for updating state
 static bool fly = false;                    // Boolean stating that the crazyflie flying or not
 static float y[3][4];                       // Measurement vectors (just to show how to use static variables)
+// Functions used for multiplication
+static inline void mat_inv(const arm_matrix_instance_f32 * pSrc, arm_matrix_instance_f32 * pDst)
+{ configASSERT(ARM_MATH_SUCCESS == arm_mat_inverse_f32(pSrc, pDst)); }
+static inline void mat_mult(const arm_matrix_instance_f32 * pSrcA, const arm_matrix_instance_f32 * pSrcB, arm_matrix_instance_f32 * pDst)
+{ configASSERT(ARM_MATH_SUCCESS == arm_mat_mult_f32(pSrcA, pSrcB, pDst)); }
+
 
 
 // Prototype of update function, which is used in estimatorBolderman function
 static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, Axis3f *gyro, Axis3f *mag, float dt);
 // Prototype of function combining prediction and measurement = actual update
-static void estimatorBoldermanDynMeas();
+static void estimatorBoldermanDynMeas(void);
 // Prototype of function saving the updated state
-static void estimatorBoldermanStateSave();
+static void estimatorBoldermanStateSave(state_t *state);
 // Prototype of function defining the dynamics
-static void estimatorBoldermanPredict();
+static void estimatorBoldermanPredict(float dt, float thrust);
+
+// Prototypes of function By Marcus Greiff (cholesky decomposition)
+int  assert_element(float val);
+int  cholesky_decomposition(float (*A)[MAX_ELEMENTS], float (*R)[MAX_ELEMENTS], int N);
 
 
+
+/*
+HERE THE MODEL STARTS
+---------------------------------------------------------------
+*/
 // Function receiving sensordata, control input and orchestrates update
 void estimatorBolderman(state_t *state, sensorData_t *sensors, control_t *control, const uint32_t tick)
 {
@@ -209,7 +228,7 @@ static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, 
   // Use dynamics to predict state at next interval
   estimatorBoldermanPredict(dt, thrust);
   // Use predicted state and measurement to improve Estimation
-  estimatorBoldermanDynMeas();
+  estimatorBoldermanDynMeas(void);
   // Save new estimation in the state
   estimatorBoldermanStateSave(state);
 }
@@ -218,12 +237,48 @@ static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, 
 // Dynamics to make a prediction of the next state
 static void estimatorBoldermanPredict(float dt, float thrust)
 {
-  // Input here dynamics, to compute a new
-  // Define sigmapoints
-  // sigmaX = [xhat, xhat+sqrtm((n+lambda)*Pxx), xhat-sqrtm((n+lambda)*Pxx)]
-  sigmaX = ....;
+  // Define the square root of Pxx (cholesky decomosition)
+  float delta[n][n] = {0};
+  int status = 0;
+  status = cholesky_decomposition(Pxx,delta,n);
+  if (status == 0) {
+    // Then no good solution delta is found, so reinitialize Pxx
+    reinitializePxx(void);
+    status = cholesky_decomposition(Pxx,delta,n);
+  }
+  // Define the sigma points
+  for (int ii = 0; ii<nsigma; ii++) {
+    for (int jj = 0; jj<n; jj++) {
+      // define sigmaX for each entry
+      if (ii == 0) {
+        // First sigmapoint is mean
+        sigmaX[jj][ii] = x[jj];
+      } else if ((ii>0) && (ii<n+1)) {
+        // Sigmapoints is mean + difference
+        sigmaX[jj][ii] = x[jj] + sqrt(lambda+n)*delta[ii-1][jj];
+      } else if ((ii>n) && (ii<nsigma)) {
+        sigmaX[jj][ii] = x[jj] - sqrt(lambda+n)*delta[ii-n-1][jj];
+      }
+    }
+  }
+
+
   // integrate one timestep
   for (int ii = 0; ii<nsigma; ii++) {
+    // Adjust value of pitch IF == PI/2 + n*pi
+    if (1/sigmaX[10][ii] > upperbound) {
+      if (sin(sigmaX[10][ii]) > 0.0) {
+        sigmaX[10][ii] = acos(1/upperbound);
+      } else {
+        sigmaX[10][ii] = -acos(1/upperbound);
+      }
+    } else if (1/sigmaX[10][ii] < -upperbound) {
+      if (sin(sigmaX[10][ii]) > 0.0) {
+        sigmaX[10][ii] = PI - acos(1/upperbound);
+      } else {
+        sigmaX[10][ii] = -PI + acos(1/upperbound);
+      }
+    }
     // Update the sigmapoints (discretized using forward euler)
     // Furthermore, note that the gyroscopic measurements are directly send through the dynamics as an input
     if (positionmeasurement == false) {
@@ -267,11 +322,51 @@ static void estimatorBoldermanPredict(float dt, float thrust)
       sigmaYplus[0][ii] = cos(sigmaXplus[9][ii])*cos(sigmaXplus[11][ii])*sigmaXplus[6][ii] + sin(sigmaXplus[11][ii])*cos(sigmaXplus[9][ii])*sigmaXplus[7][ii] - sin(sigmaXplus[10][ii])*sigmaXplus[8][ii];
       sigmaYplus[1][ii] = (cos(sigmaXplus[11][ii])*sin(sigmaXplus[10][ii])*sin(sigmaXplus[9][ii])-sin(sigmaXplus[11][ii])*cos(sigmaXplus[9][ii]))*sigmaXplus[6][ii] + (sin(sigmaXplus[11][ii])*sin(sigmaXplus[10][ii])*sin(sigmaXplus[9][ii])+cos(sigmaXplus[9][ii])*cos(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cos(sigmaXplus[10][ii])*sin(sigmaXplus[9][ii]))*sigmaXplus[8][ii];
       sigmaYplus[2][ii] = (cos(sigmaXplus[11][ii])*sin(sigmaXplus[10][ii])*cos(sigmaXplus[9][ii])+sin(sigmaXplus[11][ii])*sin(sigmaXplus[9][ii]))*sigmaXplus[6][ii] + (sin(sigmaXplus[11][ii])*sin(sigmaXplus[10][ii])*cos(sigmaXplus[9][ii])-sin(sigmaXplus[9][ii])*cos(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cos(sigmaXplus[10][ii])*cos(sigmaXplus[9][ii]))*sigmaXplus[8][ii];
-    } else {
-    /* Define here the dynamics when position measurement is known (difference between not flying)
-       Not yet necessary, since position measurement is not yet included.
-       Here it is doable to detect landing
-       COULD BE DONE DIFFERENTLY (NOT ALL DYNAMICS SHOULD BE SPLITTED I THINK, COMBINE WITH ABOVE)*/
+    } else {    // Position measurement IS available
+      if (fly) {    // When flying
+        // Position
+        sigmaXplus[0][ii] = sigmaX[0][ii] + dt*sigmaX[3][ii];
+        sigmaXplus[1][ii] = sigmaX[1][ii] + dt*sigmaX[4][ii];
+        sigmaXplus[2][ii] = sigmaX[2][ii] + dt*sigmaX[5][ii];
+        // Velocity
+        sigmaXplus[3][ii] = sigmaX[3][ii] + dt*thrust*(cos(sigmaX[11][ii])*sin(sigmaX[10][ii])*cos(sigmaX[9][ii]) + sin(sigmaX[9][ii])*sin(sigmaX[11][ii]));
+        sigmaXplus[4][ii] = sigmaX[4][ii] + dt*thrust*(sin(sigmaX[11][ii])*sin(sigmaX[10][ii])*cos(sigmaX[9][ii]) - sin(sigmaX[9][ii])*cos(sigmaX[11][ii]));
+        sigmaXplus[5][ii] = sigmaX[5][ii] + dt*(thrust*cos(sigmaX[10][ii])*cos(sigmaX[9][ii]) - g);
+        // Acceleration (is the same as the additionstep above divided by dt)
+        sigmaXplus[6][ii] = (sigmaXplus[3][ii]-sigmaX[3][ii])/dt;
+        sigmaXplus[7][ii] = (sigmaXplus[4][ii]-sigmaX[4][ii])/dt;
+        sigmaXplus[8][ii] = (sigmaXplus[5][ii]-sigmaX[5][ii])/dt;
+        // Attitude
+        sigmaXplus[9][ii] = sigmaX[9][ii]   + (dt/cos(sigmaX[10][ii]))*(cos(sigmaX[10][ii])*y[2][0] + sin(sigmaX[10][ii])*sin(sigmaX[9][ii])*y[2][1] + sin(sigmaX[10][ii])*cos(sigmaX[9][ii])*y[2][2]);
+        sigmaXplus[10][ii] = sigmaX[10][ii] + (dt/cos(sigmaX[10][ii]))*(cos(sigmaX[10][ii])*cos(sigmaX[9][ii])*y[2][1] - cos(sigmaX[10][ii])*sin(sigmaX[9][ii])*y[2][2]);
+        sigmaXplus[11][ii] = sigmaX[11][ii] + (dt/cos(sigmaX[10][ii]))*(sin(sigmaX[9][ii])*y[2][1] + cos(sigmaX[9][ii])*y[2][2]);
+      } else if (fly==false || sigmaXplus[2][ii]<0.0) {      // When not flying (NO SLIP ASSUMED, however position is already unrealiable)
+        fly = false;      // Position does not diverge, so quadcopter landed
+        // Position
+        sigmaXplus[0][ii] = sigmaX[0][ii];
+        sigmaXplus[1][ii] = sigmaX[1][ii];
+        sigmaXplus[2][ii] = 0;                // Quadcopter does not lift !
+        // Velocity
+        sigmaXplus[3][ii] = 0;
+        sigmaXplus[4][ii] = 0;
+        sigmaXplus[5][ii] = 0;
+        // Acceleration
+        sigmaXplus[6][ii] = 0;
+        sigmaXplus[7][ii] = 0;
+        sigmaXplus[8][ii] = 0;                // Hence no accelleration to (ground defines height)
+        // Attitude
+        sigmaXplus[9][ii] = 0;
+        sigmaXplus[10][ii] = 0;
+        sigmaXplus[11][ii] = sigmaX[11][ii];  // Yaw is not influenced by ground
+      }
+      // Determine the predicted output (using the state)
+      // Here only acceleration is measured (IN BODY COORDINATES)
+      sigmaYplus[0][ii] = sigmaXplus[0][ii];
+      sigmaYplus[1][ii] = sigmaXplus[1][ii];
+      sigmaYplus[2][ii] = sigmaXplus[2][ii];
+      sigmaYplus[3][ii] = cos(sigmaXplus[9][ii])*cos(sigmaXplus[11][ii])*sigmaXplus[6][ii] + sin(sigmaXplus[11][ii])*cos(sigmaXplus[9][ii])*sigmaXplus[7][ii] - sin(sigmaXplus[10][ii])*sigmaXplus[8][ii];
+      sigmaYplus[4][ii] = (cos(sigmaXplus[11][ii])*sin(sigmaXplus[10][ii])*sin(sigmaXplus[9][ii])-sin(sigmaXplus[11][ii])*cos(sigmaXplus[9][ii]))*sigmaXplus[6][ii] + (sin(sigmaXplus[11][ii])*sin(sigmaXplus[10][ii])*sin(sigmaXplus[9][ii])+cos(sigmaXplus[9][ii])*cos(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cos(sigmaXplus[10][ii])*sin(sigmaXplus[9][ii]))*sigmaXplus[8][ii];
+      sigmaYplus[5][ii] = (cos(sigmaXplus[11][ii])*sin(sigmaXplus[10][ii])*cos(sigmaXplus[9][ii])+sin(sigmaXplus[11][ii])*sin(sigmaXplus[9][ii]))*sigmaXplus[6][ii] + (sin(sigmaXplus[11][ii])*sin(sigmaXplus[10][ii])*cos(sigmaXplus[9][ii])-sin(sigmaXplus[9][ii])*cos(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cos(sigmaXplus[10][ii])*cos(sigmaXplus[9][ii]))*sigmaXplus[8][ii];
     }
   }
   // Calculate the predicted state and the predicted output
@@ -289,15 +384,44 @@ static void estimatorBoldermanPredict(float dt, float thrust)
   }
 
   // Using the predicted state and the predicted output, calculate the covariances Pxx Pxy and Pyy
-  Pxx = .......;
-  Pxy = .......;
-  Pyy = .......;
-  K = .......;
-
+  /* Following formulas used:
+      Pxx = sum_k( w_k(sigmaXplus_k - xpred)(sigmaXplus_k - xpred)^T ) + Q
+      Pxy = sum_k( w_k(sigmaXplus_k - xpred)(sigmaYplus_k - ypred)^T )
+      Pyy = sum_k( w_k(sigmaYplus_k - ypred)(sigmaYplus_k - ypred)^T ) + R
+  */
+  for (int ii = 0; ii<n; ii++) {
+    for (int jj = 0; jj<n; jj++) {
+      Pxx[ii][jj] = q[ii][jj];
+      for (int kk = 0; kk<nsigma; kk++) {
+        Pxx[ii][jj] += wc[kk] * (sigmaXplus[ii][kk] - xpred[ii]) * (sigmaXplus[jj][kk] - xpred[jj]);
+      }
+    }
+    for (int jj = 0; jj<nout; jj++) {
+      Pxy[ii][jj] = 0;
+      for (int kk = 0; kk<nsigma; kk++) {
+        Pxy[ii][jj] += wc[kk] * (sigmaXplus[ii][kk] - xpred[ii]) * (sigmaYplus[jj][kk] - ypred[jj]);
+      }
+    }
+  }
+  for (int ii = 0; ii<nout; ii++) {
+    for (int jj = 0; jj<nout; jj++) {
+      Pyy[ii][jj] = r[ii][jj];
+      for (int kk = 0; kk<nsigma; kk++) {
+        Pyy[ii][jj] += wc[kk] * (sigmaYplus[ii][kk] - ypred[ii]) * (sigmaYplus[jj][kk] - ypred[jj]);
+      }
+    }
+  }
+  // Define the kalman gain ( K = Pxy * inv(Pyy) )
+  static arm_matrix_instance_f32 Pyym = {nout, nout, Pyy};
+  static arm_matrix_instance_f32 Pyyinvm = {nout, nout, Pyyinv};
+  static arm_matrix_instance_f32 Pxym = {n, nout, Pxy};
+  static arm_matrix_instance_f32 Km = {n, nout, k};
+  mat_inv(&Pyym, &Pyyinvm);           // Inverse of Pyy
+  mat_mult(&Pxym, &Pyyinvm, &Km);     // K = Pxy inv(Pyy)
 }
 
 // Perform the update rule, using the prediction and measurement
-static void estimatorBoldermanDynMeas()
+static void estimatorBoldermanDynMeas(void)
 {
   // Input here the UKF update...
   // Slightly different depending on whether position information available
@@ -360,6 +484,19 @@ static void estimatorBoldermanStateSave(state_t *state)
 bool estimatorBoldermanTest(void)
 {
   return isInit;
+}
+
+// Sometimes Pxx needs to be reinitilized
+static void reinitializePxx(void) {
+  for (int ii = 0; ii<n; ii++) {
+    for (int jj = 0; jj<n; jj++) {
+      if (ii == jj) {
+        Pxx[ii][jj] = 0.1;
+      } else {
+        Pxx[ii][jj] = 0.0;
+      }
+    }
+  }
 }
 
 // Initializing function; is called first, necessary to perform the estimation
@@ -432,8 +569,70 @@ void estimatorBoldermanInit(void) {
   consolePrintf("Initializing the estimator finished");
 }
 
+
+/*  CHOLESKY DECOMPOSITION
+  Written by Marcus Greiff
+*/
+int assert_element(float val){
+  /***********************************************************************
+   * Here we check that the diagonal element of R is greater than or
+   * or equal to some limit, ensuring that the decomposition is done
+   * correctly and allowing detection of non-PSD matrices A
+   **********************************************************************/
+  float limit = 0.0001;
+  if (val < limit){ return 1; }
+  if (isnan(val)){ return 1; }
+  if (isinf(val)){ return 1; }
+  return 0;
+}
+int cholesky_decomposition(float (*A)[MAX_ELEMENTS], float (*R)[MAX_ELEMENTS], int N)
+{
+  /***********************************************************************
+   * CHOLESKY DECOMPOSITION
+   * Written by Marcus Greiff 17/02/2019 based on Numerical Linear
+   * Algebra, Lloyd N. Trefethen.
+   ***********************************************************************/
+  int ii, jj, kk, i, j, k;
+  for (ii = 0; ii < N; ii++){
+    for (jj = ii; jj < N; jj++){
+      R[jj][ii] = 0;
+      R[ii][jj] = A[ii][jj];
+    }
+  }
+  for (k = 0; k < N; k++){
+    for (j = k+1; j<N; j++){
+      for (i = j; i < N; i++){
+        if (assert_element(R[k][k])){return 0;}
+        R[j][i] -= R[k][i]*R[k][j]/R[k][k];
+      }
+    }
+    for (i = N-1; i>=k; i--){
+      if (assert_element(R[k][k])){return 0;}
+      R[k][i] /= sqrtf(R[k][k]);
+    }
+  }
+  return 1;
+}
+
 // State all wanted outputs, which can be plotted on the crazyflie client
-LOG_GROUP_START(BOLDERMAN)
+// SAVE ALL STATE VARIABLES
+LOG_GROUP_START(BOLDERMAN_ESTIMATION)
+  LOG_ADD(LOG_FLOAT, pos_x, &x[0])
+  LOG_ADD(LOG_FLOAT, pos_y, &x[1])
+  LOG_ADD(LOG_FLOAT, pos_z, &x[2])
+  LOG_ADD(LOG_FLOAT, vel_x, &x[3])
+  LOG_ADD(LOG_FLOAT, vel_y, &x[4])
+  LOG_ADD(LOG_FLOAT, vel_z, &x[5])
+  LOG_ADD(LOG_FLOAT, acc_x, &x[6])
+  LOG_ADD(LOG_FLOAT, acc_y, &x[7])
+  LOG_ADD(LOG_FLOAT, acc_z, &x[8])
+  LOG_ADD(LOG_FLOAT, roll, &x[9])
+  LOG_ADD(LOG_FLOAT, pitch, &x[10])
+  LOG_ADD(LOG_FLOAT, yaw, &x[11])
+LOG_GROUP_STOP(BOLDERMAN_ESTIMATION)
+
+// SAVE ALL MEASUREMENTS
+LOG_GROUP_START(BOLDERMAN_MEASUREMENTS)
   LOG_ADD(LOG_FLOAT, acc_x, &y[0][0])
   LOG_ADD(LOG_FLOAT, acc_y, &y[0][1])
   LOG_ADD(LOG_FLOAT, acc_z, &y[0][2])
@@ -443,4 +642,4 @@ LOG_GROUP_START(BOLDERMAN)
   LOG_ADD(LOG_FLOAT, gyr_x, &y[2][0])
   LOG_ADD(LOG_FLOAT, gyr_y, &y[2][1])
   LOG_ADD(LOG_FLOAT, gyr_z, &y[2][2])
-LOG_GROUP_STOP(BOLDERMAN)
+LOG_GROUP_STOP(BOLDERMAN_MEASUREMENTS)
