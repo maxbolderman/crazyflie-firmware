@@ -22,8 +22,13 @@
 #define CRAZYFLIE_WEIGHT_grams (27.0f)    // Weight of crazyflie
 #define CONTROL_TO_ACC (GRAVITY_MAGNITUDE*60.0f/CRAZYFLIE_WEIGHT_grams/65536.0f)
                 // variable defining the factor from control input to acceleration
+#define N 12                              // Dimension of system
+#define NOUT 3                            // Dimension of measurement
+#define NSIGMA (2*N+1)                    // Number of sigma points
 #define MAX_ELEMENTS 12                   // Maximum number of elements for Cholesky decomposition
-
+// Output = [ax, ay, az] --> acceleration in body coordinates
+// Output = [x, y, z, ax, ay, az] --> position in global coordinates and acceleration in body coordinates
+#define UPPERBOUND 10000                  // Upperbound after which inversion is adjusted
 
 /*******************************************************************************
 *   Internal variables for the estimator
@@ -44,33 +49,26 @@ static uint32_t gyroAccumulatorCount;       // Count variable, number of samples
 static uint32_t magAccumulatorCount;        // Count variable, number of samples of which angular acceleration measurement is summed
 static uint32_t thrustAccumulatorCount;     // Count variable, number of samples of which thrust is summed
 // Extra variables used in the Unscented Kalman Filter
-static const uint32_t n = 12;               // Dimension of dynamical model (used by Bolderman)
-static bool positionmeasurement = false;    // Boolean variable stating whether there is observation of position (0 = no position measurement, 1 = position measurement)
-// Output = [ax, ay, az] --> acceleration in body coordinates
-// Output = [x, y, z, ax, ay, az] --> position in global coordinates and acceleration in body coordinates
-static const uint32_t nout = 3;             // Dimension of output measurements (used by Bolderman); (acc and gyro)
-static const uint32_t nsigma = 2*n+1;       // Number of sigma points used for UKF
-static float alpha = 0.001;                 // Defines spread of sigma points
-static float kappa = 0;                     // Secondary scaling factor
-static float beta = 0;                      // Distributation parameter, gaussion := 2
-static float lambda = alpha*alpha*(n+kappa)-n; // Scaling parameter used for determining: Weights and Sigma points
-static const float upperbound = 10000;      // Upperbound for which we do not adjust pitch value
-static float[nsigma] wm;                    // Weights for calculating the mean (initialized in estimaterBoldermanInit())
-static float[nsigma] wc;                    // Weights for calculating the covariance (initialized in estimaterBoldermanInit())
-static float[n][n] q;                       // Covariance of process noise (zero-mean Gaussian distributed)
-static float[nout][nout] r;                 // Covariance of measurement noise (zero-mean Gaussian distributed)
+static float alpha = 0.001f;                // Defines spread of sigma points
+static float kappa = 0.0f;                  // Secondary scaling factor
+static float beta = 0.0f;                   // Distributation parameter, gaussion := 2
+static float lambda;                        // Scaling parameter used for determining: Weights and Sigma points
+static float wm[NSIGMA];                    // Weights for calculating the mean (initialized in estimaterBoldermanInit())
+static float wc[NSIGMA];                    // Weights for calculating the covariance (initialized in estimaterBoldermanInit())
+static float q[N][N];                       // Covariance of process noise (zero-mean Gaussian distributed)
+static float r[NOUT][NOUT];                 // Covariance of measurement noise (zero-mean Gaussian distributed)
 // State momentary (x, y, z, xdot, ydot, zdot, xddot, yddot, zddot, pitch, yaw, roll)
-static float[n] x;                          // State column, containing values of the states
-static float[n][nsigma] sigmaX;             // Matrix containing all sigmapoints
-static float[n][nsigma] sigmaXplus;         // Matrix containing updated sigmapoints
-static float[nout][nsigma] sigmaYplus;      // Matrix containing output of sigma points
-static float[n] xpred;                      // Predicted state vector
-static float[nout] ypred;                   // Predicted output of outputted sigmapoints
-static float[n][n] Pxx;                     // Covariance of state Estimation
-static float[n][nout] Pxy;                  // Covariance of state - outputs
-static float[nout][nout] Pyy;               // Covariance of ouput
-static float[nout][nout] Pyyinv;            // Inverse of Pyy
-static float[n][nout] k;                    // Kalman gain (Pxy * inv(Pyy))
+static float x[N];                          // State column, containing values of the states
+static float sigmaX[N][NSIGMA];             // Matrix containing all sigmapoints
+static float sigmaXplus[N][NSIGMA];         // Matrix containing updated sigmapoints
+static float sigmaYplus[NOUT][NSIGMA];      // Matrix containing output of sigma points
+static float xpred[N];                      // Predicted state vector
+static float ypred[NOUT];                   // Predicted output of outputted sigmapoints
+static float Pxx[N][N];                     // Covariance of state Estimation
+static float Pxy[N][NOUT];                  // Covariance of state - outputs
+static float Pyy[NOUT][NOUT];               // Covariance of ouput
+static float Pyyinv[NOUT][NOUT];            // Inverse of Pyy
+static float k[N][NOUT];                    // Kalman gain (Pxy * inv(Pyy))
 static uint32_t tick;                       // Tick variable used for updating state
 static bool fly = false;                    // Boolean stating that the crazyflie flying or not
 static float y[3][4];                       // Measurement vectors (just to show how to use static variables)
@@ -93,7 +91,7 @@ static void estimatorBoldermanPredict(float dt, float thrust);
 
 // Prototypes of function By Marcus Greiff (cholesky decomposition)
 int  assert_element(float val);
-int  cholesky_decomposition(float (*A)[MAX_ELEMENTS], float (*R)[MAX_ELEMENTS], int N);
+int  cholesky_decomposition(float (*A)[MAX_ELEMENTS], float (*R)[MAX_ELEMENTS], int n);
 
 
 
@@ -238,45 +236,45 @@ static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, 
 static void estimatorBoldermanPredict(float dt, float thrust)
 {
   // Define the square root of Pxx (cholesky decomosition)
-  float delta[n][n] = {0};
+  float delta[N][N] = {0};
   int status = 0;
-  status = cholesky_decomposition(Pxx,delta,n);
+  status = cholesky_decomposition(Pxx,delta,N);
   if (status == 0) {
     // Then no good solution delta is found, so reinitialize Pxx
     reinitializePxx(void);
-    status = cholesky_decomposition(Pxx,delta,n);
+    status = cholesky_decomposition(Pxx,delta,N);
   }
   // Define the sigma points
-  for (int ii = 0; ii<nsigma; ii++) {
-    for (int jj = 0; jj<n; jj++) {
+  for (int ii = 0; ii<NSIGMA; ii++) {
+    for (int jj = 0; jj<N; jj++) {
       // define sigmaX for each entry
       if (ii == 0) {
         // First sigmapoint is mean
         sigmaX[jj][ii] = x[jj];
-      } else if ((ii>0) && (ii<n+1)) {
+      } else if ((ii>0) && (ii<N+1)) {
         // Sigmapoints is mean + difference
         sigmaX[jj][ii] = x[jj] + sqrt(lambda+n)*delta[ii-1][jj];
-      } else if ((ii>n) && (ii<nsigma)) {
-        sigmaX[jj][ii] = x[jj] - sqrt(lambda+n)*delta[ii-n-1][jj];
+      } else if ((ii>N) && (ii<NSIGMA)) {
+        sigmaX[jj][ii] = x[jj] - sqrt(lambda+n)*delta[ii-N-1][jj];
       }
     }
   }
 
 
   // integrate one timestep
-  for (int ii = 0; ii<nsigma; ii++) {
+  for (int ii = 0; ii<NSIGMA; ii++) {
     // Adjust value of pitch IF == PI/2 + n*pi
-    if (1/sigmaX[10][ii] > upperbound) {
+    if (1/sigmaX[10][ii] > UPPERBOUND) {
       if (sin(sigmaX[10][ii]) > 0.0) {
-        sigmaX[10][ii] = acos(1/upperbound);
+        sigmaX[10][ii] = acos(1/UPPERBOUND);
       } else {
-        sigmaX[10][ii] = -acos(1/upperbound);
+        sigmaX[10][ii] = -acos(1/UPPERBOUND);
       }
-    } else if (1/sigmaX[10][ii] < -upperbound) {
+    } else if (1/sigmaX[10][ii] < -UPPERBOUND) {
       if (sin(sigmaX[10][ii]) > 0.0) {
-        sigmaX[10][ii] = PI - acos(1/upperbound);
+        sigmaX[10][ii] = PI - acos(1/UPPERBOUND);
       } else {
-        sigmaX[10][ii] = -PI + acos(1/upperbound);
+        sigmaX[10][ii] = -PI + acos(1/UPPERBOUND);
       }
     }
     // Update the sigmapoints (discretized using forward euler)
@@ -370,15 +368,15 @@ static void estimatorBoldermanPredict(float dt, float thrust)
     }
   }
   // Calculate the predicted state and the predicted output
-  for (int ii=0; ii<n; ii++) {      // Predicted state
+  for (int ii=0; ii<N; ii++) {      // Predicted state
     xpred[ii] = 0;
-    for (int jj=0; jj<nsigma; jj++) {
+    for (int jj=0; jj<NSIGMA; jj++) {
       xpred[ii] += wm[jj]*sigmaXplus[ii][jj];
     }
   }
-  for (int ii=0; ii<nout; ii++) {   // Predicted output
+  for (int ii=0; ii<NOUT; ii++) {   // Predicted output
     ypred[ii] = 0;
-    for (int jj=0; jj<nsigma; jj++) {
+    for (int jj=0; jj<NSIGMA; jj++) {
       ypred[ii] += wm[jj]*sigmaYplus[ii][jj];
     }
   }
@@ -389,33 +387,33 @@ static void estimatorBoldermanPredict(float dt, float thrust)
       Pxy = sum_k( w_k(sigmaXplus_k - xpred)(sigmaYplus_k - ypred)^T )
       Pyy = sum_k( w_k(sigmaYplus_k - ypred)(sigmaYplus_k - ypred)^T ) + R
   */
-  for (int ii = 0; ii<n; ii++) {
-    for (int jj = 0; jj<n; jj++) {
+  for (int ii = 0; ii<N; ii++) {
+    for (int jj = 0; jj<N; jj++) {
       Pxx[ii][jj] = q[ii][jj];
-      for (int kk = 0; kk<nsigma; kk++) {
+      for (int kk = 0; kk<NSIGMA; kk++) {
         Pxx[ii][jj] += wc[kk] * (sigmaXplus[ii][kk] - xpred[ii]) * (sigmaXplus[jj][kk] - xpred[jj]);
       }
     }
-    for (int jj = 0; jj<nout; jj++) {
+    for (int jj = 0; jj<NOUT; jj++) {
       Pxy[ii][jj] = 0;
-      for (int kk = 0; kk<nsigma; kk++) {
+      for (int kk = 0; kk<NSIGMA; kk++) {
         Pxy[ii][jj] += wc[kk] * (sigmaXplus[ii][kk] - xpred[ii]) * (sigmaYplus[jj][kk] - ypred[jj]);
       }
     }
   }
-  for (int ii = 0; ii<nout; ii++) {
-    for (int jj = 0; jj<nout; jj++) {
+  for (int ii = 0; ii<NOUT; ii++) {
+    for (int jj = 0; jj<NOUT; jj++) {
       Pyy[ii][jj] = r[ii][jj];
-      for (int kk = 0; kk<nsigma; kk++) {
+      for (int kk = 0; kk<NSIGMA; kk++) {
         Pyy[ii][jj] += wc[kk] * (sigmaYplus[ii][kk] - ypred[ii]) * (sigmaYplus[jj][kk] - ypred[jj]);
       }
     }
   }
   // Define the kalman gain ( K = Pxy * inv(Pyy) )
-  static arm_matrix_instance_f32 Pyym = {nout, nout, Pyy};
-  static arm_matrix_instance_f32 Pyyinvm = {nout, nout, Pyyinv};
-  static arm_matrix_instance_f32 Pxym = {n, nout, Pxy};
-  static arm_matrix_instance_f32 Km = {n, nout, k};
+  static arm_matrix_instance_f32 Pyym = {NOUT, NOUT, (float *)Pyy};
+  static arm_matrix_instance_f32 Pyyinvm = {NOUT, NOUT, (float *)Pyyinv};
+  static arm_matrix_instance_f32 Pxym = {N, NOUT, (float *)Pxy};
+  static arm_matrix_instance_f32 Km = {N, NOUT, (float *)k};
   mat_inv(&Pyym, &Pyyinvm);           // Inverse of Pyy
   mat_mult(&Pxym, &Pyyinvm, &Km);     // K = Pxy inv(Pyy)
 }
@@ -423,7 +421,7 @@ static void estimatorBoldermanPredict(float dt, float thrust)
 // Perform the update rule, using the prediction and measurement
 static void estimatorBoldermanDynMeas(void)
 {
-  // Input here the UKF update...
+  // UKF UPDATE OF THE STATE
   // Slightly different depending on whether position information available
   if (positionmeasurement == false) {
     // Update using only acceleration measurements
@@ -434,6 +432,23 @@ static void estimatorBoldermanDynMeas(void)
     // Update using acceleration and position measurements
     for (int ii = 0; ii<n; ii++) {
       x[ii] = xpred[ii] + (k[ii][0]*(y[3][0]-ypred[0]) + k[ii][1]*(y[3][1]-ypred[1]) + k[ii][2]*(y[3][2]-ypred[2]) + k[ii][3]*(y[0][0]-ypred[3]) + k[ii][4]*(y[0][1]-ypred[4]) + k[ii][5]*(y[0][2]-ypred[5]) );
+    }
+  }
+  // UKF UPDATE OF THE STATE COVARIANCE
+  // Pxxnew = Pxx - K Pyy K'
+  static float KPyy[N][NOUT];
+  static arm_matrix_instance_f32 KPyym = {N, NOUT, (float *)KPyy};
+  static float Ktrans[NOUT][N];
+  static arm_matrix_instance_f32 Ktransm = {NOUT, N, (float *)Ktrans};
+  static float KPyyK[N][N];
+  static arm_matrix_instance_f32 KPyyKm = {N, N, (float *)KPyyK}
+  mat_mult(&Km, &Pyym, &KPyym);
+  mat_trans(&Km, &Ktransm);
+  mat_mult(&KPyym, &Ktransm, &KPyyKm);
+  // Determine the new Pxx
+  for (int ii=0; ii<N; ii++) {
+    for (int jj=0; jj<N; jj++) {
+      Pxx[ii][jj] -= KPyyK[ii][jj];
     }
   }
 }
@@ -488,8 +503,8 @@ bool estimatorBoldermanTest(void)
 
 // Sometimes Pxx needs to be reinitilized
 static void reinitializePxx(void) {
-  for (int ii = 0; ii<n; ii++) {
-    for (int jj = 0; jj<n; jj++) {
+  for (int ii = 0; ii<N; ii++) {
+    for (int jj = 0; jj<N; jj++) {
       if (ii == jj) {
         Pxx[ii][jj] = 0.1;
       } else {
@@ -518,32 +533,33 @@ void estimatorBoldermanInit(void) {
   thrustAccumulatorCount = 0;
 
   // Initialize the variables necessary for UKF (declared above)
+  lambda = alpha*alpha*(N+kappa)-N;
   // Covariance of initial Estimation
-  for (int ii = 0; ii<n; ii++) {
+  for (int ii = 0; ii<N; ii++) {
     Pxx[ii][ii] = 0.1;
-    for (int jj = 0; jj<n; jj++) {
+    for (int jj = 0; jj<N; jj++) {
       Pxy[ii][jj] = 0;
     }
   }
   // Weights for computing mean and covariance
-  for (int ii = 0; ii<nsigma; ii++) {
+  for (int ii = 0; ii<NSIGMA; ii++) {
     if (ii == 0) {
       wc[ii] = lambda/(n+lambda) + (1-alpha*alpha+beta);
       wm[ii] = lambda/(n+lambda);
     } else {
-      wc[ii] = 1/(2*(n+lambda));
-      wm[ii] = 1/(2*(n+lambda));
+      wc[ii] = 1/(2*(N+lambda));
+      wm[ii] = 1/(2*(N+lambda));
     }
   }
   // Noise definitions
   // covariance process noise; q
   // Use same for loop to immediately initialize x and xpred
   // Also initialize the sigmapoints to zero
-  for (int ii = 0; ii<n; ii++) {
+  for (int ii = 0; ii<N; ii++) {
     x[ii] = 0;
     xpred[ii] = 0;
     q[ii][ii] = (1/100)*0.01;
-    for (int jj = 0; jj<nsigma; jj++) {
+    for (int jj = 0; jj<NSIGMA; jj++) {
       sigmaX[ii][jj] = 0;
       sigmaXplus[ii][jj] = 0;
     }
@@ -551,13 +567,13 @@ void estimatorBoldermanInit(void) {
   // covariance measurement noise; r
   // Use same for loop to immediately initialize ypred, which should be done using output equations
   // Also initialize the output of the sigmapoints to zero
-  for (int ii = 0; ii<nout; ii++) {
+  for (int ii = 0; ii<NOUT; ii++) {
     r[ii][ii] = 0.001;
     ypred[ii] = 0;
-    for (int jj = 0; jj<nout; jj++) {
+    for (int jj = 0; jj<NOUT; jj++) {
       Pyy[ii][jj] = 0;
     }
-    for (int jj = 0; jj<nsigma; jj++) {
+    for (int jj = 0; jj<NSIGMA; jj++) {
       sigmaYplus = 0;
     }
   }
@@ -585,7 +601,7 @@ int assert_element(float val){
   if (isinf(val)){ return 1; }
   return 0;
 }
-int cholesky_decomposition(float (*A)[MAX_ELEMENTS], float (*R)[MAX_ELEMENTS], int N)
+int cholesky_decomposition(float (*A)[MAX_ELEMENTS], float (*R)[MAX_ELEMENTS], int n)
 {
   /***********************************************************************
    * CHOLESKY DECOMPOSITION
@@ -593,20 +609,20 @@ int cholesky_decomposition(float (*A)[MAX_ELEMENTS], float (*R)[MAX_ELEMENTS], i
    * Algebra, Lloyd N. Trefethen.
    ***********************************************************************/
   int ii, jj, kk, i, j, k;
-  for (ii = 0; ii < N; ii++){
-    for (jj = ii; jj < N; jj++){
+  for (ii = 0; ii < n; ii++){
+    for (jj = ii; jj < n; jj++){
       R[jj][ii] = 0;
       R[ii][jj] = A[ii][jj];
     }
   }
-  for (k = 0; k < N; k++){
-    for (j = k+1; j<N; j++){
-      for (i = j; i < N; i++){
+  for (k = 0; k < n; k++){
+    for (j = k+1; j<n; j++){
+      for (i = j; i < n; i++){
         if (assert_element(R[k][k])){return 0;}
         R[j][i] -= R[k][i]*R[k][j]/R[k][k];
       }
     }
-    for (i = N-1; i>=k; i--){
+    for (i = n-1; i>=k; i--){
       if (assert_element(R[k][k])){return 0;}
       R[k][i] /= sqrtf(R[k][k]);
     }
