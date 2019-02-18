@@ -25,7 +25,6 @@
 #define N 12                              // Dimension of system
 #define NOUT 3                            // Dimension of measurement
 #define NSIGMA (2*N+1)                    // Number of sigma points
-#define MAX_ELEMENTS 12                   // Maximum number of elements for Cholesky decomposition
 // Output = [ax, ay, az] --> acceleration in body coordinates
 // Output = [x, y, z, ax, ay, az] --> position in global coordinates and acceleration in body coordinates
 #define UPPERBOUND 10000                  // Upperbound after which inversion is adjusted
@@ -33,7 +32,7 @@
 /*******************************************************************************
 *   Internal variables for the estimator
 
-/*******************************************************************************
+*******************************************************************************
 *   Variables for debugging and logging
 *******************************************************************************/
 static bool isInit = false;                 // Boolean variable, whether system is initialized
@@ -69,7 +68,6 @@ static float Pxy[N][NOUT];                  // Covariance of state - outputs
 static float Pyy[NOUT][NOUT];               // Covariance of ouput
 static float Pyyinv[NOUT][NOUT];            // Inverse of Pyy
 static float k[N][NOUT];                    // Kalman gain (Pxy * inv(Pyy))
-static uint32_t tick;                       // Tick variable used for updating state
 static bool fly = false;                    // Boolean stating that the crazyflie flying or not
 static float y[3][4];                       // Measurement vectors (just to show how to use static variables)
 // Functions used for multiplication
@@ -81,17 +79,17 @@ static inline void mat_mult(const arm_matrix_instance_f32 * pSrcA, const arm_mat
 
 
 // Prototype of update function, which is used in estimatorBolderman function
-static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, Axis3f *gyro, Axis3f *mag, float dt);
+static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, Axis3f *gyro, Axis3f *mag, float dt, uint32_t osTick);
 // Prototype of function combining prediction and measurement = actual update
 static void estimatorBoldermanDynMeas(void);
 // Prototype of function saving the updated state
-static void estimatorBoldermanStateSave(state_t *state);
+static void estimatorBoldermanStateSave(state_t *state, uint32_t osTick);
 // Prototype of function defining the dynamics
 static void estimatorBoldermanPredict(float dt, float thrust);
 
 // Prototypes of function By Marcus Greiff (cholesky decomposition)
 int  assert_element(float val);
-int  cholesky_decomposition(float (*A)[MAX_ELEMENTS], float (*R)[MAX_ELEMENTS], int n);
+int  cholesky_decomposition(float (*A)[N], float (*R)[N], int n);
 
 
 
@@ -105,7 +103,6 @@ void estimatorBolderman(state_t *state, sensorData_t *sensors, control_t *contro
 
   // Asks for tick at moment of start calling this function (estimatorBolderman() )
   uint32_t osTick = xTaskGetTickCount(); // would be nice if this had a precision higher than 1ms...
-  tick = osTick;                         // Used when defining the updated state
 
   // Average IMU measurements (in case the observer is run at a lower
   // rate than the controller). Convert accelerometer measurements from Gs to
@@ -163,7 +160,7 @@ void estimatorBolderman(state_t *state, sensorData_t *sensors, control_t *contro
     thrustAccumulator /= thrustAccumulatorCount;
     // When not flying, define when quadcopter lifts
     // Afterwards landing can only be detected WHEN USING POSITION MEASUREMENTS
-    if (fly == false) && (thrustAccumulator > GRAVITY_MAGNITUDE) {
+    if ((fly == false) && (thrustAccumulator > GRAVITY_MAGNITUDE)) {
       fly = true;
     }
 
@@ -171,7 +168,7 @@ void estimatorBolderman(state_t *state, sensorData_t *sensors, control_t *contro
     float dt = (float)(osTick-lastPrediction)/configTICK_RATE_HZ;
 
     // This is where we perform the time-integration of the state estimate
-    estimatorBoldermanUpdate(state, thrustAccumulator, &accAccumulator, &gyroAccumulator, &magAccumulator, dt);
+    estimatorBoldermanUpdate(state, thrustAccumulator, &accAccumulator, &gyroAccumulator, &magAccumulator, dt, osTick);
 
     // Reset the accumulators and counters to be used next sample
     lastPrediction = osTick;                  // Last moment in time we made a prediction == now
@@ -187,7 +184,7 @@ void estimatorBolderman(state_t *state, sensorData_t *sensors, control_t *contro
 }
 
 // Here the integration is performed and the state estimation is performed
-static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, Axis3f *gyro, Axis3f *mag, float dt)
+static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, Axis3f *gyro, Axis3f *mag, float dt, uint32_t osTick)
 {
   // Store the measuremets y1 y2 y3 as rows in a matrix
   // Acceleration
@@ -226,9 +223,9 @@ static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, 
   // Use dynamics to predict state at next interval
   estimatorBoldermanPredict(dt, thrust);
   // Use predicted state and measurement to improve Estimation
-  estimatorBoldermanDynMeas(void);
+  estimatorBoldermanDynMeas();
   // Save new estimation in the state
-  estimatorBoldermanStateSave(state);
+  estimatorBoldermanStateSave(state, osTick);
 }
 
 
@@ -241,7 +238,7 @@ static void estimatorBoldermanPredict(float dt, float thrust)
   status = cholesky_decomposition(Pxx,delta,N);
   if (status == 0) {
     // Then no good solution delta is found, so reinitialize Pxx
-    reinitializePxx(void);
+    reinitializePxx();
     status = cholesky_decomposition(Pxx,delta,N);
   }
   // Define the sigma points
@@ -454,26 +451,26 @@ static void estimatorBoldermanDynMeas(void)
 }
 
 // Save the estimated state in the variable state
-static void estimatorBoldermanStateSave(state_t *state)
+static void estimatorBoldermanStateSave(state_t *state, uint32_t osTick)
 {
   // Input here the method to save the improved estimation in the variable state...
   // Postion
   state->position = (point_t) {
-    .timestamp = tick,
+    .timestamp = osTick,
     .x = x[0],
     .y = x[1],
     .z = x[2]
   };
   // Velocity
   state->velocity = (velocity_t) {
-    .timestamp = tick,
+    .timestamp = osTick,
     .x = x[3],
     .y = x[4],
     .z = x[5]
   };
   // Acceleration (without the gravity and in unit G)
   state->acc = (acc_t) {
-    .timestamp = tick,
+    .timestamp = osTick,
     .x = ((x[6]) / CONTROL_TO_ACC),
     .y = ((x[7]) / CONTROL_TO_ACC),
     .z = ((x[8] + GRAVITY_MAGNITUDE) / CONTROL_TO_ACC);
@@ -481,7 +478,7 @@ static void estimatorBoldermanStateSave(state_t *state)
   // Attitude
   // STATED IN stabilizer_types.h AS LEGACY CF2 BODY COORDINATES, WHERE PITCH IS INVERTED????????
   state->attitude = (attitude_t) {
-    .timestamp = tick,
+    .timestamp = osTick,
     .roll = (x[9] * RAD_TO_DEG),
     .pitch = 1/(x[10] * RAD_TO_DEG),
     .yaw = (x[11] * RAD_TO_DEG)
@@ -601,14 +598,14 @@ int assert_element(float val){
   if (isinf(val)){ return 1; }
   return 0;
 }
-int cholesky_decomposition(float (*A)[MAX_ELEMENTS], float (*R)[MAX_ELEMENTS], int n)
+int cholesky_decomposition(float (*A)[N], float (*R)[N], int n)
 {
   /***********************************************************************
    * CHOLESKY DECOMPOSITION
    * Written by Marcus Greiff 17/02/2019 based on Numerical Linear
    * Algebra, Lloyd N. Trefethen.
    ***********************************************************************/
-  int ii, jj, kk, i, j, k;
+  int ii, jj, i, j, k;
   for (ii = 0; ii < n; ii++){
     for (jj = ii; jj < n; jj++){
       R[jj][ii] = 0;
