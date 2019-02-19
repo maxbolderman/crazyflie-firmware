@@ -71,10 +71,14 @@ static float k[N][NOUT];                    // Kalman gain (Pxy * inv(Pyy))
 static bool fly = false;                    // Boolean stating that the crazyflie flying or not
 static float y[3][4];                       // Measurement vectors (just to show how to use static variables)
 // Functions used for multiplication
+static inline void mat_trans(const arm_matrix_instance_f32 * pSrc, arm_matrix_instance_f32 * pDst)
+{ configASSERT(ARM_MATH_SUCCESS == arm_mat_trans_f32(pSrc, pDst)); }
 static inline void mat_inv(const arm_matrix_instance_f32 * pSrc, arm_matrix_instance_f32 * pDst)
 { configASSERT(ARM_MATH_SUCCESS == arm_mat_inverse_f32(pSrc, pDst)); }
 static inline void mat_mult(const arm_matrix_instance_f32 * pSrcA, const arm_matrix_instance_f32 * pSrcB, arm_matrix_instance_f32 * pDst)
 { configASSERT(ARM_MATH_SUCCESS == arm_mat_mult_f32(pSrcA, pSrcB, pDst)); }
+static inline float arm_sqrt(float32_t in)
+{ float pOut = 0; arm_status result = arm_sqrt_f32(in, &pOut); configASSERT(ARM_MATH_SUCCESS == result); return pOut; }
 
 
 
@@ -86,6 +90,8 @@ static void estimatorBoldermanDynMeas(void);
 static void estimatorBoldermanStateSave(state_t *state, uint32_t osTick);
 // Prototype of function defining the dynamics
 static void estimatorBoldermanPredict(float dt, float thrust);
+// Prototype of function for resetting Pxx (when cholesky cannot be computed)
+static void resetPxx(void);
 
 // Prototypes of function By Marcus Greiff (cholesky decomposition)
 int  assert_element(float val);
@@ -201,7 +207,7 @@ static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, 
   y[2][2] = gyro->z;
   // Position (if applicable) (not yet included)
   /*
-  if (positionmeasurement == true) {
+  if (NOUT == 6) {
     y[3][0] = ...;
     y[3][1] = ...;
     y[3][2] = ...;
@@ -233,12 +239,12 @@ static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, 
 static void estimatorBoldermanPredict(float dt, float thrust)
 {
   // Define the square root of Pxx (cholesky decomosition)
-  float delta[N][N] = {0};
+  float delta[N][N] = {{0}};
   int status = 0;
   status = cholesky_decomposition(Pxx,delta,N);
   if (status == 0) {
     // Then no good solution delta is found, so reinitialize Pxx
-    reinitializePxx();
+    resetPxx();
     status = cholesky_decomposition(Pxx,delta,N);
   }
   // Define the sigma points
@@ -250,9 +256,9 @@ static void estimatorBoldermanPredict(float dt, float thrust)
         sigmaX[jj][ii] = x[jj];
       } else if ((ii>0) && (ii<N+1)) {
         // Sigmapoints is mean + difference
-        sigmaX[jj][ii] = x[jj] + sqrt(lambda+n)*delta[ii-1][jj];
+        sigmaX[jj][ii] = x[jj] + sqrtf(lambda+N)*delta[ii-1][jj];
       } else if ((ii>N) && (ii<NSIGMA)) {
-        sigmaX[jj][ii] = x[jj] - sqrt(lambda+n)*delta[ii-N-1][jj];
+        sigmaX[jj][ii] = x[jj] - sqrtf(lambda+N)*delta[ii-N-1][jj];
       }
     }
   }
@@ -263,37 +269,37 @@ static void estimatorBoldermanPredict(float dt, float thrust)
     // Adjust value of pitch IF == PI/2 + n*pi
     if (1/sigmaX[10][ii] > UPPERBOUND) {
       if (sin(sigmaX[10][ii]) > 0.0) {
-        sigmaX[10][ii] = acos(1/UPPERBOUND);
+        sigmaX[10][ii] = acosf(1/UPPERBOUND);
       } else {
-        sigmaX[10][ii] = -acos(1/UPPERBOUND);
+        sigmaX[10][ii] = -acosf(1/UPPERBOUND);
       }
     } else if (1/sigmaX[10][ii] < -UPPERBOUND) {
       if (sin(sigmaX[10][ii]) > 0.0) {
-        sigmaX[10][ii] = PI - acos(1/UPPERBOUND);
+        sigmaX[10][ii] = PI - acosf(1/UPPERBOUND);
       } else {
-        sigmaX[10][ii] = -PI + acos(1/UPPERBOUND);
+        sigmaX[10][ii] = -PI + acosf(1/UPPERBOUND);
       }
     }
     // Update the sigmapoints (discretized using forward euler)
     // Furthermore, note that the gyroscopic measurements are directly send through the dynamics as an input
-    if (positionmeasurement == false) {
+    if (NOUT == 3) {
       if (fly) {    // When flying
         // Position
         sigmaXplus[0][ii] = sigmaX[0][ii] + dt*sigmaX[3][ii];
         sigmaXplus[1][ii] = sigmaX[1][ii] + dt*sigmaX[4][ii];
         sigmaXplus[2][ii] = sigmaX[2][ii] + dt*sigmaX[5][ii];
         // Velocity
-        sigmaXplus[3][ii] = sigmaX[3][ii] + dt*thrust*(cos(sigmaX[11][ii])*sin(sigmaX[10][ii])*cos(sigmaX[9][ii]) + sin(sigmaX[9][ii])*sin(sigmaX[11][ii]));
-        sigmaXplus[4][ii] = sigmaX[4][ii] + dt*thrust*(sin(sigmaX[11][ii])*sin(sigmaX[10][ii])*cos(sigmaX[9][ii]) - sin(sigmaX[9][ii])*cos(sigmaX[11][ii]));
-        sigmaXplus[5][ii] = sigmaX[5][ii] + dt*(thrust*cos(sigmaX[10][ii])*cos(sigmaX[9][ii]) - g);
+        sigmaXplus[3][ii] = sigmaX[3][ii] + dt*thrust*(cosf(sigmaX[11][ii])*sinf(sigmaX[10][ii])*cosf(sigmaX[9][ii]) + sinf(sigmaX[9][ii])*sinf(sigmaX[11][ii]));
+        sigmaXplus[4][ii] = sigmaX[4][ii] + dt*thrust*(sinf(sigmaX[11][ii])*sinf(sigmaX[10][ii])*cosf(sigmaX[9][ii]) - sinf(sigmaX[9][ii])*cosf(sigmaX[11][ii]));
+        sigmaXplus[5][ii] = sigmaX[5][ii] + dt*(thrust*cosf(sigmaX[10][ii])*cosf(sigmaX[9][ii]) - GRAVITY_MAGNITUDE);
         // Acceleration (is the same as the additionstep above divided by dt)
         sigmaXplus[6][ii] = (sigmaXplus[3][ii]-sigmaX[3][ii])/dt;
         sigmaXplus[7][ii] = (sigmaXplus[4][ii]-sigmaX[4][ii])/dt;
         sigmaXplus[8][ii] = (sigmaXplus[5][ii]-sigmaX[5][ii])/dt;
         // Attitude
-        sigmaXplus[9][ii] = sigmaX[9][ii]   + (dt/cos(sigmaX[10][ii]))*(cos(sigmaX[10][ii])*y[2][0] + sin(sigmaX[10][ii])*sin(sigmaX[9][ii])*y[2][1] + sin(sigmaX[10][ii])*cos(sigmaX[9][ii])*y[2][2]);
-        sigmaXplus[10][ii] = sigmaX[10][ii] + (dt/cos(sigmaX[10][ii]))*(cos(sigmaX[10][ii])*cos(sigmaX[9][ii])*y[2][1] - cos(sigmaX[10][ii])*sin(sigmaX[9][ii])*y[2][2]);
-        sigmaXplus[11][ii] = sigmaX[11][ii] + (dt/cos(sigmaX[10][ii]))*(sin(sigmaX[9][ii])*y[2][1] + cos(sigmaX[9][ii])*y[2][2]);
+        sigmaXplus[9][ii] = sigmaX[9][ii]   + (dt/cosf(sigmaX[10][ii]))*(cosf(sigmaX[10][ii])*y[2][0] + sinf(sigmaX[10][ii])*sinf(sigmaX[9][ii])*y[2][1] + sinf(sigmaX[10][ii])*cosf(sigmaX[9][ii])*y[2][2]);
+        sigmaXplus[10][ii] = sigmaX[10][ii] + (dt/cosf(sigmaX[10][ii]))*(cosf(sigmaX[10][ii])*cosf(sigmaX[9][ii])*y[2][1] - cosf(sigmaX[10][ii])*sinf(sigmaX[9][ii])*y[2][2]);
+        sigmaXplus[11][ii] = sigmaX[11][ii] + (dt/cosf(sigmaX[10][ii]))*(sinf(sigmaX[9][ii])*y[2][1] + cosf(sigmaX[9][ii])*y[2][2]);
       } else {      // When not flying (NO SLIP ASSUMED, however position is already unrealiable)
         // Position
         sigmaXplus[0][ii] = sigmaX[0][ii];
@@ -314,28 +320,28 @@ static void estimatorBoldermanPredict(float dt, float thrust)
       }
       // Determine the predicted output (using the state)
       // Here only acceleration is measured (IN BODY COORDINATES)
-      sigmaYplus[0][ii] = cos(sigmaXplus[9][ii])*cos(sigmaXplus[11][ii])*sigmaXplus[6][ii] + sin(sigmaXplus[11][ii])*cos(sigmaXplus[9][ii])*sigmaXplus[7][ii] - sin(sigmaXplus[10][ii])*sigmaXplus[8][ii];
-      sigmaYplus[1][ii] = (cos(sigmaXplus[11][ii])*sin(sigmaXplus[10][ii])*sin(sigmaXplus[9][ii])-sin(sigmaXplus[11][ii])*cos(sigmaXplus[9][ii]))*sigmaXplus[6][ii] + (sin(sigmaXplus[11][ii])*sin(sigmaXplus[10][ii])*sin(sigmaXplus[9][ii])+cos(sigmaXplus[9][ii])*cos(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cos(sigmaXplus[10][ii])*sin(sigmaXplus[9][ii]))*sigmaXplus[8][ii];
-      sigmaYplus[2][ii] = (cos(sigmaXplus[11][ii])*sin(sigmaXplus[10][ii])*cos(sigmaXplus[9][ii])+sin(sigmaXplus[11][ii])*sin(sigmaXplus[9][ii]))*sigmaXplus[6][ii] + (sin(sigmaXplus[11][ii])*sin(sigmaXplus[10][ii])*cos(sigmaXplus[9][ii])-sin(sigmaXplus[9][ii])*cos(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cos(sigmaXplus[10][ii])*cos(sigmaXplus[9][ii]))*sigmaXplus[8][ii];
-    } else {    // Position measurement IS available
+      sigmaYplus[0][ii] = cosf(sigmaXplus[9][ii])*cosf(sigmaXplus[11][ii])*sigmaXplus[6][ii] + sinf(sigmaXplus[11][ii])*cosf(sigmaXplus[9][ii])*sigmaXplus[7][ii] - sinf(sigmaXplus[10][ii])*sigmaXplus[8][ii];
+      sigmaYplus[1][ii] = (cosf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*sinf(sigmaXplus[9][ii])-sinf(sigmaXplus[11][ii])*cosf(sigmaXplus[9][ii]))*sigmaXplus[6][ii] + (sinf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*sinf(sigmaXplus[9][ii])+cosf(sigmaXplus[9][ii])*cosf(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cosf(sigmaXplus[10][ii])*sinf(sigmaXplus[9][ii]))*sigmaXplus[8][ii];
+      sigmaYplus[2][ii] = (cosf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*cosf(sigmaXplus[9][ii])+sinf(sigmaXplus[11][ii])*sinf(sigmaXplus[9][ii]))*sigmaXplus[6][ii] + (sinf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*cosf(sigmaXplus[9][ii])-sinf(sigmaXplus[9][ii])*cosf(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cosf(sigmaXplus[10][ii])*cosf(sigmaXplus[9][ii]))*sigmaXplus[8][ii];
+    } else if (NOUT == 6) {    // Position measurement IS available
       if (fly) {    // When flying
         // Position
         sigmaXplus[0][ii] = sigmaX[0][ii] + dt*sigmaX[3][ii];
         sigmaXplus[1][ii] = sigmaX[1][ii] + dt*sigmaX[4][ii];
         sigmaXplus[2][ii] = sigmaX[2][ii] + dt*sigmaX[5][ii];
         // Velocity
-        sigmaXplus[3][ii] = sigmaX[3][ii] + dt*thrust*(cos(sigmaX[11][ii])*sin(sigmaX[10][ii])*cos(sigmaX[9][ii]) + sin(sigmaX[9][ii])*sin(sigmaX[11][ii]));
-        sigmaXplus[4][ii] = sigmaX[4][ii] + dt*thrust*(sin(sigmaX[11][ii])*sin(sigmaX[10][ii])*cos(sigmaX[9][ii]) - sin(sigmaX[9][ii])*cos(sigmaX[11][ii]));
-        sigmaXplus[5][ii] = sigmaX[5][ii] + dt*(thrust*cos(sigmaX[10][ii])*cos(sigmaX[9][ii]) - g);
+        sigmaXplus[3][ii] = sigmaX[3][ii] + dt*thrust*(cosf(sigmaX[11][ii])*sinf(sigmaX[10][ii])*cosf(sigmaX[9][ii]) + sinf(sigmaX[9][ii])*sinf(sigmaX[11][ii]));
+        sigmaXplus[4][ii] = sigmaX[4][ii] + dt*thrust*(sinf(sigmaX[11][ii])*sinf(sigmaX[10][ii])*cosf(sigmaX[9][ii]) - sinf(sigmaX[9][ii])*cosf(sigmaX[11][ii]));
+        sigmaXplus[5][ii] = sigmaX[5][ii] + dt*(thrust*cosf(sigmaX[10][ii])*cosf(sigmaX[9][ii]) - GRAVITY_MAGNITUDE);
         // Acceleration (is the same as the additionstep above divided by dt)
         sigmaXplus[6][ii] = (sigmaXplus[3][ii]-sigmaX[3][ii])/dt;
         sigmaXplus[7][ii] = (sigmaXplus[4][ii]-sigmaX[4][ii])/dt;
         sigmaXplus[8][ii] = (sigmaXplus[5][ii]-sigmaX[5][ii])/dt;
         // Attitude
-        sigmaXplus[9][ii] = sigmaX[9][ii]   + (dt/cos(sigmaX[10][ii]))*(cos(sigmaX[10][ii])*y[2][0] + sin(sigmaX[10][ii])*sin(sigmaX[9][ii])*y[2][1] + sin(sigmaX[10][ii])*cos(sigmaX[9][ii])*y[2][2]);
-        sigmaXplus[10][ii] = sigmaX[10][ii] + (dt/cos(sigmaX[10][ii]))*(cos(sigmaX[10][ii])*cos(sigmaX[9][ii])*y[2][1] - cos(sigmaX[10][ii])*sin(sigmaX[9][ii])*y[2][2]);
-        sigmaXplus[11][ii] = sigmaX[11][ii] + (dt/cos(sigmaX[10][ii]))*(sin(sigmaX[9][ii])*y[2][1] + cos(sigmaX[9][ii])*y[2][2]);
-      } else if (fly==false || sigmaXplus[2][ii]<0.0) {      // When not flying (NO SLIP ASSUMED, however position is already unrealiable)
+        sigmaXplus[9][ii] = sigmaX[9][ii]   + (dt/cosf(sigmaX[10][ii]))*(cosf(sigmaX[10][ii])*y[2][0] + sinf(sigmaX[10][ii])*sinf(sigmaX[9][ii])*y[2][1] + sinf(sigmaX[10][ii])*cosf(sigmaX[9][ii])*y[2][2]);
+        sigmaXplus[10][ii] = sigmaX[10][ii] + (dt/cosf(sigmaX[10][ii]))*(cosf(sigmaX[10][ii])*cosf(sigmaX[9][ii])*y[2][1] - cosf(sigmaX[10][ii])*sinf(sigmaX[9][ii])*y[2][2]);
+        sigmaXplus[11][ii] = sigmaX[11][ii] + (dt/cosf(sigmaX[10][ii]))*(sinf(sigmaX[9][ii])*y[2][1] + cosf(sigmaX[9][ii])*y[2][2]);
+      } else if (fly==false || sigmaXplus[2][ii]<0.0f) {      // When not flying (NO SLIP ASSUMED, however position is already unrealiable)
         fly = false;      // Position does not diverge, so quadcopter landed
         // Position
         sigmaXplus[0][ii] = sigmaX[0][ii];
@@ -359,9 +365,9 @@ static void estimatorBoldermanPredict(float dt, float thrust)
       sigmaYplus[0][ii] = sigmaXplus[0][ii];
       sigmaYplus[1][ii] = sigmaXplus[1][ii];
       sigmaYplus[2][ii] = sigmaXplus[2][ii];
-      sigmaYplus[3][ii] = cos(sigmaXplus[9][ii])*cos(sigmaXplus[11][ii])*sigmaXplus[6][ii] + sin(sigmaXplus[11][ii])*cos(sigmaXplus[9][ii])*sigmaXplus[7][ii] - sin(sigmaXplus[10][ii])*sigmaXplus[8][ii];
-      sigmaYplus[4][ii] = (cos(sigmaXplus[11][ii])*sin(sigmaXplus[10][ii])*sin(sigmaXplus[9][ii])-sin(sigmaXplus[11][ii])*cos(sigmaXplus[9][ii]))*sigmaXplus[6][ii] + (sin(sigmaXplus[11][ii])*sin(sigmaXplus[10][ii])*sin(sigmaXplus[9][ii])+cos(sigmaXplus[9][ii])*cos(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cos(sigmaXplus[10][ii])*sin(sigmaXplus[9][ii]))*sigmaXplus[8][ii];
-      sigmaYplus[5][ii] = (cos(sigmaXplus[11][ii])*sin(sigmaXplus[10][ii])*cos(sigmaXplus[9][ii])+sin(sigmaXplus[11][ii])*sin(sigmaXplus[9][ii]))*sigmaXplus[6][ii] + (sin(sigmaXplus[11][ii])*sin(sigmaXplus[10][ii])*cos(sigmaXplus[9][ii])-sin(sigmaXplus[9][ii])*cos(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cos(sigmaXplus[10][ii])*cos(sigmaXplus[9][ii]))*sigmaXplus[8][ii];
+      sigmaYplus[3][ii] = cosf(sigmaXplus[9][ii])*cosf(sigmaXplus[11][ii])*sigmaXplus[6][ii] + sinf(sigmaXplus[11][ii])*cosf(sigmaXplus[9][ii])*sigmaXplus[7][ii] - sinf(sigmaXplus[10][ii])*sigmaXplus[8][ii];
+      sigmaYplus[4][ii] = (cosf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*sinf(sigmaXplus[9][ii])-sinf(sigmaXplus[11][ii])*cosf(sigmaXplus[9][ii]))*sigmaXplus[6][ii] + (sinf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*sinf(sigmaXplus[9][ii])+cosf(sigmaXplus[9][ii])*cosf(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cosf(sigmaXplus[10][ii])*sinf(sigmaXplus[9][ii]))*sigmaXplus[8][ii];
+      sigmaYplus[5][ii] = (cosf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*cosf(sigmaXplus[9][ii])+sinf(sigmaXplus[11][ii])*sinf(sigmaXplus[9][ii]))*sigmaXplus[6][ii] + (sinf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*cosf(sigmaXplus[9][ii])-sinf(sigmaXplus[9][ii])*cosf(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cosf(sigmaXplus[10][ii])*cosf(sigmaXplus[9][ii]))*sigmaXplus[8][ii];
     }
   }
   // Calculate the predicted state and the predicted output
@@ -411,6 +417,7 @@ static void estimatorBoldermanPredict(float dt, float thrust)
   static arm_matrix_instance_f32 Pyyinvm = {NOUT, NOUT, (float *)Pyyinv};
   static arm_matrix_instance_f32 Pxym = {N, NOUT, (float *)Pxy};
   static arm_matrix_instance_f32 Km = {N, NOUT, (float *)k};
+  // Do multiplications and inverse
   mat_inv(&Pyym, &Pyyinvm);           // Inverse of Pyy
   mat_mult(&Pxym, &Pyyinvm, &Km);     // K = Pxy inv(Pyy)
 }
@@ -420,14 +427,14 @@ static void estimatorBoldermanDynMeas(void)
 {
   // UKF UPDATE OF THE STATE
   // Slightly different depending on whether position information available
-  if (positionmeasurement == false) {
+  if (NOUT == 3) {
     // Update using only acceleration measurements
-    for (int ii = 0; ii<n; ii++) {
+    for (int ii = 0; ii<N; ii++) {
       x[ii] = xpred[ii] + (k[ii][0]*(y[0][0]-ypred[0]) + k[ii][1]*(y[0][1]-ypred[1]) + k[ii][2]*(y[0][2]-ypred[2]));
     }
-  } else {
+  } else if (NOUT == 6){
     // Update using acceleration and position measurements
-    for (int ii = 0; ii<n; ii++) {
+    for (int ii = 0; ii<N; ii++) {
       x[ii] = xpred[ii] + (k[ii][0]*(y[3][0]-ypred[0]) + k[ii][1]*(y[3][1]-ypred[1]) + k[ii][2]*(y[3][2]-ypred[2]) + k[ii][3]*(y[0][0]-ypred[3]) + k[ii][4]*(y[0][1]-ypred[4]) + k[ii][5]*(y[0][2]-ypred[5]) );
     }
   }
@@ -438,7 +445,11 @@ static void estimatorBoldermanDynMeas(void)
   static float Ktrans[NOUT][N];
   static arm_matrix_instance_f32 Ktransm = {NOUT, N, (float *)Ktrans};
   static float KPyyK[N][N];
-  static arm_matrix_instance_f32 KPyyKm = {N, N, (float *)KPyyK}
+  static arm_matrix_instance_f32 KPyyKm = {N, N, (float *)KPyyK};
+  static arm_matrix_instance_f32 Km = {N, NOUT, (float *)k};
+  static arm_matrix_instance_f32 Pyym = {NOUT, NOUT, (float *)Pyy};
+
+  // Do multiplations and transpose
   mat_mult(&Km, &Pyym, &KPyym);
   mat_trans(&Km, &Ktransm);
   mat_mult(&KPyym, &Ktransm, &KPyyKm);
@@ -473,7 +484,7 @@ static void estimatorBoldermanStateSave(state_t *state, uint32_t osTick)
     .timestamp = osTick,
     .x = ((x[6]) / CONTROL_TO_ACC),
     .y = ((x[7]) / CONTROL_TO_ACC),
-    .z = ((x[8] + GRAVITY_MAGNITUDE) / CONTROL_TO_ACC);
+    .z = ((x[8] + GRAVITY_MAGNITUDE) / CONTROL_TO_ACC)
   };
   // Attitude
   // STATED IN stabilizer_types.h AS LEGACY CF2 BODY COORDINATES, WHERE PITCH IS INVERTED????????
@@ -499,7 +510,7 @@ bool estimatorBoldermanTest(void)
 }
 
 // Sometimes Pxx needs to be reinitilized
-static void reinitializePxx(void) {
+static void resetPxx(void) {
   for (int ii = 0; ii<N; ii++) {
     for (int jj = 0; jj<N; jj++) {
       if (ii == jj) {
@@ -531,18 +542,12 @@ void estimatorBoldermanInit(void) {
 
   // Initialize the variables necessary for UKF (declared above)
   lambda = alpha*alpha*(N+kappa)-N;
-  // Covariance of initial Estimation
-  for (int ii = 0; ii<N; ii++) {
-    Pxx[ii][ii] = 0.1;
-    for (int jj = 0; jj<N; jj++) {
-      Pxy[ii][jj] = 0;
-    }
-  }
+
   // Weights for computing mean and covariance
   for (int ii = 0; ii<NSIGMA; ii++) {
     if (ii == 0) {
-      wc[ii] = lambda/(n+lambda) + (1-alpha*alpha+beta);
-      wm[ii] = lambda/(n+lambda);
+      wc[ii] = lambda/(N+lambda) + (1-alpha*alpha+beta);
+      wm[ii] = lambda/(N+lambda);
     } else {
       wc[ii] = 1/(2*(N+lambda));
       wm[ii] = 1/(2*(N+lambda));
@@ -554,25 +559,13 @@ void estimatorBoldermanInit(void) {
   // Also initialize the sigmapoints to zero
   for (int ii = 0; ii<N; ii++) {
     x[ii] = 0;
-    xpred[ii] = 0;
     q[ii][ii] = (1/100)*0.01;
-    for (int jj = 0; jj<NSIGMA; jj++) {
-      sigmaX[ii][jj] = 0;
-      sigmaXplus[ii][jj] = 0;
-    }
   }
   // covariance measurement noise; r
   // Use same for loop to immediately initialize ypred, which should be done using output equations
   // Also initialize the output of the sigmapoints to zero
   for (int ii = 0; ii<NOUT; ii++) {
     r[ii][ii] = 0.001;
-    ypred[ii] = 0;
-    for (int jj = 0; jj<NOUT; jj++) {
-      Pyy[ii][jj] = 0;
-    }
-    for (int jj = 0; jj<NSIGMA; jj++) {
-      sigmaYplus = 0;
-    }
   }
 
 
