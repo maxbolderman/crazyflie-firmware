@@ -48,9 +48,9 @@ static uint32_t gyroAccumulatorCount;       // Count variable, number of samples
 static uint32_t magAccumulatorCount;        // Count variable, number of samples of which angular acceleration measurement is summed
 static uint32_t thrustAccumulatorCount;     // Count variable, number of samples of which thrust is summed
 // Extra variables used in the Unscented Kalman Filter
-static float alpha = 0.001f;                // Defines spread of sigma points
+static float alpha = 0.01f;                // Defines spread of sigma points
 static float kappa = 0.0f;                  // Secondary scaling factor
-static float beta = 0.0f;                   // Distributation parameter, gaussion := 2
+static float beta = 2.0f;                   // Distributation parameter, gaussion := 2
 static float lambda;                        // Scaling parameter used for determining: Weights and Sigma points
 static float wm[NSIGMA];                    // Weights for calculating the mean (initialized in estimaterBoldermanInit())
 static float wc[NSIGMA];                    // Weights for calculating the covariance (initialized in estimaterBoldermanInit())
@@ -69,7 +69,9 @@ static float Pyy[NOUT][NOUT];               // Covariance of ouput
 static float Pyyinv[NOUT][NOUT];            // Inverse of Pyy
 static float k[N][NOUT];                    // Kalman gain (Pxy * inv(Pyy))
 static bool fly = false;                    // Boolean stating that the crazyflie flying or not
-static float y[3][4];                       // Measurement vectors (just to show how to use static variables)
+static float y[NOUT];                       // Measurement vectors (just to show how to use static variables)
+static float omega[3];                      // Gyroscopic measurements
+
 // Functions used for multiplication
 static inline void mat_trans(const arm_matrix_instance_f32 * pSrc, arm_matrix_instance_f32 * pDst)
 { configASSERT(ARM_MATH_SUCCESS == arm_mat_trans_f32(pSrc, pDst)); }
@@ -164,11 +166,6 @@ void estimatorBolderman(state_t *state, sensorData_t *sensors, control_t *contro
 
     // Compute average thrust
     thrustAccumulator /= thrustAccumulatorCount;
-    // When not flying, define when quadcopter lifts
-    // Afterwards landing can only be detected WHEN USING POSITION MEASUREMENTS
-    if ((fly == false) && (thrustAccumulator > GRAVITY_MAGNITUDE)) {
-      fly = true;
-    }
 
     // Computes the time step used
     float dt = (float)(osTick-lastPrediction)/configTICK_RATE_HZ;
@@ -193,26 +190,26 @@ void estimatorBolderman(state_t *state, sensorData_t *sensors, control_t *contro
 static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, Axis3f *gyro, Axis3f *mag, float dt, uint32_t osTick)
 {
   // Store the measuremets y1 y2 y3 as rows in a matrix
-  // Acceleration
-  y[0][0] = acc->x;
-  y[0][1] = acc->y;
-  y[0][2] = acc->z;
-  // Magnetometer (not used in state estimation)
-  y[1][0] = mag->x;
-  y[1][1] = mag->y;
-  y[1][2] = mag->z;
-  // Gyroscope
-  y[2][0] = gyro->x;
-  y[2][1] = gyro->y;
-  y[2][2] = gyro->z;
-  // Position (if applicable) (not yet included)
-  /*
-  if (NOUT == 6) {
-    y[3][0] = ...;
-    y[3][1] = ...;
-    y[3][2] = ...;
+  if (NOUT == 3) {
+    y[0] = acc->x;
+    y[1] = acc->y;
+    y[2] = acc->z;
+  } else if (NOUT == 6) {
+    y[0] = mag->x;    // SHOULD BE CHANGED TO POSITION MEASUREMENT
+    y[1] = mag->y;
+    y[2] = mag->z;
+    y[3] = acc->x;
+    y[4] = acc->y;
+    y[5] = acc->z;
   }
-  */
+  omega[0] = gyro->x;   // ACTUALLY MEASUREMENT, USED AS INPUT!
+  omega[1] = gyro->y;
+  omega[2] = gyro->z;
+  // If the quadcopter was not flying, it will if thrust exceeds gravity
+  if ((fly == false) && (thrustAccumulator > GRAVITY_MAGNITUDE)) {
+    fly = true;
+  }
+
 
   /* The following things are performed here:
       - a prediction of the state at the current moment is made, using the previous state (note that you need dt)
@@ -265,109 +262,74 @@ static void estimatorBoldermanPredict(float dt, float thrust)
 
 
   // integrate one timestep
-  for (int ii = 0; ii<NSIGMA; ii++) {
+  for (int ii = 0; ii<NSIGMA; ii++) {   // Integrate one step (somewhat different when position measurement is available)
     // Adjust value of pitch IF == PI/2 + n*pi
     if (1/sigmaX[10][ii] > UPPERBOUND) {
-      if (sin(sigmaX[10][ii]) > 0.0) {
+      if (sinf(sigmaX[10][ii]) > 0.0f) {
         sigmaX[10][ii] = acosf(1/UPPERBOUND);
       } else {
         sigmaX[10][ii] = -acosf(1/UPPERBOUND);
       }
     } else if (1/sigmaX[10][ii] < -UPPERBOUND) {
-      if (sin(sigmaX[10][ii]) > 0.0) {
+      if (sinf(sigmaX[10][ii]) > 0.0f) {
         sigmaX[10][ii] = PI - acosf(1/UPPERBOUND);
       } else {
         sigmaX[10][ii] = -PI + acosf(1/UPPERBOUND);
       }
     }
+
     // Update the sigmapoints (discretized using forward euler)
     // Furthermore, note that the gyroscopic measurements are directly send through the dynamics as an input
-    if (NOUT == 3) {
-      if (fly) {    // When flying
-        // Position
-        sigmaXplus[0][ii] = sigmaX[0][ii] + dt*sigmaX[3][ii];
-        sigmaXplus[1][ii] = sigmaX[1][ii] + dt*sigmaX[4][ii];
-        sigmaXplus[2][ii] = sigmaX[2][ii] + dt*sigmaX[5][ii];
-        // Velocity
-        sigmaXplus[3][ii] = sigmaX[3][ii] + dt*thrust*(cosf(sigmaX[11][ii])*sinf(sigmaX[10][ii])*cosf(sigmaX[9][ii]) + sinf(sigmaX[9][ii])*sinf(sigmaX[11][ii]));
-        sigmaXplus[4][ii] = sigmaX[4][ii] + dt*thrust*(sinf(sigmaX[11][ii])*sinf(sigmaX[10][ii])*cosf(sigmaX[9][ii]) - sinf(sigmaX[9][ii])*cosf(sigmaX[11][ii]));
-        sigmaXplus[5][ii] = sigmaX[5][ii] + dt*(thrust*cosf(sigmaX[10][ii])*cosf(sigmaX[9][ii]) - GRAVITY_MAGNITUDE);
-        // Acceleration (is the same as the additionstep above divided by dt)
-        sigmaXplus[6][ii] = (sigmaXplus[3][ii]-sigmaX[3][ii])/dt;
-        sigmaXplus[7][ii] = (sigmaXplus[4][ii]-sigmaX[4][ii])/dt;
-        sigmaXplus[8][ii] = (sigmaXplus[5][ii]-sigmaX[5][ii])/dt;
-        // Attitude
-        sigmaXplus[9][ii] = sigmaX[9][ii]   + (dt/cosf(sigmaX[10][ii]))*(cosf(sigmaX[10][ii])*y[2][0] + sinf(sigmaX[10][ii])*sinf(sigmaX[9][ii])*y[2][1] + sinf(sigmaX[10][ii])*cosf(sigmaX[9][ii])*y[2][2]);
-        sigmaXplus[10][ii] = sigmaX[10][ii] + (dt/cosf(sigmaX[10][ii]))*(cosf(sigmaX[10][ii])*cosf(sigmaX[9][ii])*y[2][1] - cosf(sigmaX[10][ii])*sinf(sigmaX[9][ii])*y[2][2]);
-        sigmaXplus[11][ii] = sigmaX[11][ii] + (dt/cosf(sigmaX[10][ii]))*(sinf(sigmaX[9][ii])*y[2][1] + cosf(sigmaX[9][ii])*y[2][2]);
-      } else {      // When not flying (NO SLIP ASSUMED, however position is already unrealiable)
-        // Position
-        sigmaXplus[0][ii] = sigmaX[0][ii];
-        sigmaXplus[1][ii] = sigmaX[1][ii];
-        sigmaXplus[2][ii] = 0;                // Quadcopter does not lift !
-        // Velocity
-        sigmaXplus[3][ii] = 0;
-        sigmaXplus[4][ii] = 0;
-        sigmaXplus[5][ii] = 0;
-        // Acceleration
-        sigmaXplus[6][ii] = 0;
-        sigmaXplus[7][ii] = 0;
-        sigmaXplus[8][ii] = 0;                // Hence no accelleration to (ground defines height)
-        // Attitude
-        sigmaXplus[9][ii] = 0;
-        sigmaXplus[10][ii] = 0;
-        sigmaXplus[11][ii] = sigmaX[11][ii];  // Yaw is not influenced by ground
-      }
-      // Determine the predicted output (using the state)
-      // Here only acceleration is measured (IN BODY COORDINATES)
-      sigmaYplus[0][ii] = cosf(sigmaXplus[9][ii])*cosf(sigmaXplus[11][ii])*sigmaXplus[6][ii] + sinf(sigmaXplus[11][ii])*cosf(sigmaXplus[9][ii])*sigmaXplus[7][ii] - sinf(sigmaXplus[10][ii])*sigmaXplus[8][ii];
-      sigmaYplus[1][ii] = (cosf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*sinf(sigmaXplus[9][ii])-sinf(sigmaXplus[11][ii])*cosf(sigmaXplus[9][ii]))*sigmaXplus[6][ii] + (sinf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*sinf(sigmaXplus[9][ii])+cosf(sigmaXplus[9][ii])*cosf(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cosf(sigmaXplus[10][ii])*sinf(sigmaXplus[9][ii]))*sigmaXplus[8][ii];
-      sigmaYplus[2][ii] = (cosf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*cosf(sigmaXplus[9][ii])+sinf(sigmaXplus[11][ii])*sinf(sigmaXplus[9][ii]))*sigmaXplus[6][ii] + (sinf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*cosf(sigmaXplus[9][ii])-sinf(sigmaXplus[9][ii])*cosf(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cosf(sigmaXplus[10][ii])*cosf(sigmaXplus[9][ii]))*sigmaXplus[8][ii];
-    } else if (NOUT == 6) {    // Position measurement IS available
-      if (fly) {    // When flying
-        // Position
-        sigmaXplus[0][ii] = sigmaX[0][ii] + dt*sigmaX[3][ii];
-        sigmaXplus[1][ii] = sigmaX[1][ii] + dt*sigmaX[4][ii];
-        sigmaXplus[2][ii] = sigmaX[2][ii] + dt*sigmaX[5][ii];
-        // Velocity
-        sigmaXplus[3][ii] = sigmaX[3][ii] + dt*thrust*(cosf(sigmaX[11][ii])*sinf(sigmaX[10][ii])*cosf(sigmaX[9][ii]) + sinf(sigmaX[9][ii])*sinf(sigmaX[11][ii]));
-        sigmaXplus[4][ii] = sigmaX[4][ii] + dt*thrust*(sinf(sigmaX[11][ii])*sinf(sigmaX[10][ii])*cosf(sigmaX[9][ii]) - sinf(sigmaX[9][ii])*cosf(sigmaX[11][ii]));
-        sigmaXplus[5][ii] = sigmaX[5][ii] + dt*(thrust*cosf(sigmaX[10][ii])*cosf(sigmaX[9][ii]) - GRAVITY_MAGNITUDE);
-        // Acceleration (is the same as the additionstep above divided by dt)
-        sigmaXplus[6][ii] = (sigmaXplus[3][ii]-sigmaX[3][ii])/dt;
-        sigmaXplus[7][ii] = (sigmaXplus[4][ii]-sigmaX[4][ii])/dt;
-        sigmaXplus[8][ii] = (sigmaXplus[5][ii]-sigmaX[5][ii])/dt;
-        // Attitude
-        sigmaXplus[9][ii] = sigmaX[9][ii]   + (dt/cosf(sigmaX[10][ii]))*(cosf(sigmaX[10][ii])*y[2][0] + sinf(sigmaX[10][ii])*sinf(sigmaX[9][ii])*y[2][1] + sinf(sigmaX[10][ii])*cosf(sigmaX[9][ii])*y[2][2]);
-        sigmaXplus[10][ii] = sigmaX[10][ii] + (dt/cosf(sigmaX[10][ii]))*(cosf(sigmaX[10][ii])*cosf(sigmaX[9][ii])*y[2][1] - cosf(sigmaX[10][ii])*sinf(sigmaX[9][ii])*y[2][2]);
-        sigmaXplus[11][ii] = sigmaX[11][ii] + (dt/cosf(sigmaX[10][ii]))*(sinf(sigmaX[9][ii])*y[2][1] + cosf(sigmaX[9][ii])*y[2][2]);
-      } else if (fly==false || sigmaXplus[2][ii]<0.0f) {      // When not flying (NO SLIP ASSUMED, however position is already unrealiable)
-        fly = false;      // Position does not diverge, so quadcopter landed
-        // Position
-        sigmaXplus[0][ii] = sigmaX[0][ii];
-        sigmaXplus[1][ii] = sigmaX[1][ii];
-        sigmaXplus[2][ii] = 0;                // Quadcopter does not lift !
-        // Velocity
-        sigmaXplus[3][ii] = 0;
-        sigmaXplus[4][ii] = 0;
-        sigmaXplus[5][ii] = 0;
-        // Acceleration
-        sigmaXplus[6][ii] = 0;
-        sigmaXplus[7][ii] = 0;
-        sigmaXplus[8][ii] = 0;                // Hence no accelleration to (ground defines height)
-        // Attitude
-        sigmaXplus[9][ii] = 0;
-        sigmaXplus[10][ii] = 0;
-        sigmaXplus[11][ii] = sigmaX[11][ii];  // Yaw is not influenced by ground
-      }
-      // Determine the predicted output (using the state)
-      // Here only acceleration is measured (IN BODY COORDINATES)
+    if (fly) {
+      sigmaXplus[0][ii] = sigmaX[0][ii] + dt*sigmaX[3][ii];
+      sigmaXplus[1][ii] = sigmaX[1][ii] + dt*sigmaX[4][ii];
+      sigmaXplus[2][ii] = sigmaX[2][ii] + dt*sigmaX[5][ii];
+      // Velocity
+      sigmaXplus[3][ii] = sigmaX[3][ii] + dt*thrust*(cosf(sigmaX[11][ii])*sinf(sigmaX[10][ii])*cosf(sigmaX[9][ii]) + sinf(sigmaX[9][ii])*sinf(sigmaX[11][ii]));
+      sigmaXplus[4][ii] = sigmaX[4][ii] + dt*thrust*(sinf(sigmaX[11][ii])*sinf(sigmaX[10][ii])*cosf(sigmaX[9][ii]) - cosf(sigmaX[11][ii])*sinf(sigmaX[9][ii]));
+      sigmaXplus[5][ii] = sigmaX[5][ii] + dt*(-GRAVITY_MAGNITUDE + thrust*(cosf(sigmaX[9][ii])*cosf(sigmaX[10][ii])));
+      // Acceleration (is the same as the additionstep above divided by dt)
+      // This one might be tricky -> actually average acceleration from [k, k+1] -> IS THE SAME AS THE MEASUREMENT
+      sigmaXplus[6][ii] = (sigmaXplus[3][ii]-sigmaX[3][ii])/dt;
+      sigmaXplus[7][ii] = (sigmaXplus[4][ii]-sigmaX[4][ii])/dt;
+      sigmaXplus[8][ii] = (sigmaXplus[5][ii]-sigmaX[5][ii])/dt;
+      // Attitude
+      sigmaXplus[9][ii]  = sigmaX[9][ii]  + (dt/cosf(sigmaX[10][ii])) * (cosf(sigmaX[10][ii])*omega[0] + sinf(sigmaX[10][ii])*sinf(sigmaX[9][ii])*omega[1] + sinf(sigmaX[10][ii])*cosf(sigmaX[9][ii])*omega[2]);
+      sigmaXplus[10][ii] = sigmaX[10][ii] + (dt/cosf(sigmaX[10][ii])) * (cosf(sigmaX[10][ii])*cosf(sigmaX[9][ii])*omega[1] - cosf(sigmaX[10][ii])*sinf(sigmaX[9][ii])*omega[2]);
+      sigmaXplus[11][ii] = sigmaX[11][ii] + (dt/cosf(sigmaX[10][ii])) * (sinf(sigmaX[9][ii])*omega[1] + cosf(sigmaX[9][ii])*omega[2]);
+    }
+    if ((NOUT == 6) && (sigmaXplus[2][ii] < 0)) {   // When landend (can only be done when position measurement is available, otherwise positions will drift)
+      fly = false;
+    }
+    if (!fly) {
+      sigmaXplus[0][ii] = sigmaX[0][ii];
+      sigmaXplus[1][ii] = sigmaX[1][ii];
+      sigmaXplus[2][ii] = 0;                // Quadcopter does not lift !
+      // Velocity
+      sigmaXplus[3][ii] = 0;
+      sigmaXplus[4][ii] = 0;
+      sigmaXplus[5][ii] = 0;
+      // Acceleration
+      sigmaXplus[6][ii] = 0;
+      sigmaXplus[7][ii] = 0;
+      sigmaXplus[8][ii] = 0;                // Hence no accelleration to (ground defines height)
+      // Attitude
+      sigmaXplus[9][ii]  = 0;
+      sigmaXplus[10][ii] = 0;
+      sigmaXplus[11][ii] = sigmaX[11][ii];  // Yaw is not influenced by ground
+    }
+    // Now compute the output vector
+    if (NOUT == 3) {    // NO POSITION MEASUREMENT -> output = [ax,ay,az] IN BODY COORDINATES (IMU Measurement)
+      sigmaYplus[0][ii] = cosf(sigmaXplus[9][ii])*cosf(sigmaXplus[10][ii])*sigmaXplus[6][ii] + cosf(sigmaXplus[9][ii])*sinf(sigmaXplus[11][ii])*sigmaXplus[7][ii] - sinf(sigmaXplus[10][ii])*(sigmaXplus[8][ii]+GRAVITY_MAGNITUDE);
+      sigmaYplus[1][ii] = (cosf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*sinf(sigmaXplus[9][ii])-cosf(sigmaXplus[9][ii])*sinf(sigmaXplus[11][ii]))*sigmaXplus[6][ii] + (sinf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*sinf(sigmaXplus[9][ii])+cosf(sigmaXplus[9][ii])*cosf(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cosf(sigmaXplus[10][ii])*sinf(sigmaXplus[9][ii]))*(sigmaXplus[8][ii]+GRAVITY_MAGNITUDE);
+      sigmaYplus[2][ii] = (cosf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*cosf(sigmaXplus[9][ii])+sinf(sigmaXplus[9][ii])*sinf(sigmaXplus[11][ii]))*sigmaXplus[6][ii] + (sinf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*cosf(sigmaXplus[9][ii])-sinf(sigmaXplus[9][ii])*cosf(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cosf(sigmaXplus[10][ii])*cosf(sigmaXplus[9][ii]))*(sigmaXplus[8][ii]+GRAVITY_MAGNITUDE);
+    } else if (NOUT == 6) { // WITH POSITION MEASUREMENT -> OUTPUT = [x,y,z, ax,ay,az] Position in global coordinates, acceleration in BODY COORDINATES (IMU Measurement)
       sigmaYplus[0][ii] = sigmaXplus[0][ii];
       sigmaYplus[1][ii] = sigmaXplus[1][ii];
       sigmaYplus[2][ii] = sigmaXplus[2][ii];
-      sigmaYplus[3][ii] = cosf(sigmaXplus[9][ii])*cosf(sigmaXplus[11][ii])*sigmaXplus[6][ii] + sinf(sigmaXplus[11][ii])*cosf(sigmaXplus[9][ii])*sigmaXplus[7][ii] - sinf(sigmaXplus[10][ii])*sigmaXplus[8][ii];
-      sigmaYplus[4][ii] = (cosf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*sinf(sigmaXplus[9][ii])-sinf(sigmaXplus[11][ii])*cosf(sigmaXplus[9][ii]))*sigmaXplus[6][ii] + (sinf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*sinf(sigmaXplus[9][ii])+cosf(sigmaXplus[9][ii])*cosf(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cosf(sigmaXplus[10][ii])*sinf(sigmaXplus[9][ii]))*sigmaXplus[8][ii];
-      sigmaYplus[5][ii] = (cosf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*cosf(sigmaXplus[9][ii])+sinf(sigmaXplus[11][ii])*sinf(sigmaXplus[9][ii]))*sigmaXplus[6][ii] + (sinf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*cosf(sigmaXplus[9][ii])-sinf(sigmaXplus[9][ii])*cosf(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cosf(sigmaXplus[10][ii])*cosf(sigmaXplus[9][ii]))*sigmaXplus[8][ii];
+      sigmaYplus[3][ii] = cosf(sigmaXplus[9][ii])*cosf(sigmaXplus[10][ii])*sigmaXplus[6][ii] + cosf(sigmaXplus[9][ii])*sinf(sigmaXplus[11][ii])*sigmaXplus[7][ii] - sinf(sigmaXplus[10][ii])*(sigmaXplus[8][ii]+GRAVITY_MAGNITUDE);
+      sigmaYplus[4][ii] = (cosf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*sinf(sigmaXplus[9][ii])-cosf(sigmaXplus[9][ii])*sinf(sigmaXplus[11][ii]))*sigmaXplus[6][ii] + (sinf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*sinf(sigmaXplus[9][ii])+cosf(sigmaXplus[9][ii])*cosf(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cosf(sigmaXplus[10][ii])*sinf(sigmaXplus[9][ii]))*(sigmaXplus[8][ii]+GRAVITY_MAGNITUDE);
+      sigmaYplus[5][ii] = (cosf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*cosf(sigmaXplus[9][ii])+sinf(sigmaXplus[9][ii])*sinf(sigmaXplus[11][ii]))*sigmaXplus[6][ii] + (sinf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*cosf(sigmaXplus[9][ii])-sinf(sigmaXplus[9][ii])*cosf(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cosf(sigmaXplus[10][ii])*cosf(sigmaXplus[9][ii]))*(sigmaXplus[8][ii]+GRAVITY_MAGNITUDE);
     }
   }
   // Calculate the predicted state and the predicted output
@@ -390,22 +352,22 @@ static void estimatorBoldermanPredict(float dt, float thrust)
       Pxy = sum_k( w_k(sigmaXplus_k - xpred)(sigmaYplus_k - ypred)^T )
       Pyy = sum_k( w_k(sigmaYplus_k - ypred)(sigmaYplus_k - ypred)^T ) + R
   */
-  for (int ii = 0; ii<N; ii++) {
-    for (int jj = 0; jj<N; jj++) {
+  for (int ii = 0; ii<N; ii++) {  // Pxx, Pxy
+    for (int jj = 0; jj<N; jj++) {  // Pxx
       Pxx[ii][jj] = q[ii][jj];
       for (int kk = 0; kk<NSIGMA; kk++) {
         Pxx[ii][jj] += wc[kk] * (sigmaXplus[ii][kk] - xpred[ii]) * (sigmaXplus[jj][kk] - xpred[jj]);
       }
     }
-    for (int jj = 0; jj<NOUT; jj++) {
+    for (int jj = 0; jj<NOUT; jj++) {   // Pxy
       Pxy[ii][jj] = 0;
       for (int kk = 0; kk<NSIGMA; kk++) {
         Pxy[ii][jj] += wc[kk] * (sigmaXplus[ii][kk] - xpred[ii]) * (sigmaYplus[jj][kk] - ypred[jj]);
       }
     }
   }
-  for (int ii = 0; ii<NOUT; ii++) {
-    for (int jj = 0; jj<NOUT; jj++) {
+  for (int ii = 0; ii<NOUT; ii++) {   // Pyy
+    for (int jj = 0; jj<NOUT; jj++) {   // Pyy
       Pyy[ii][jj] = r[ii][jj];
       for (int kk = 0; kk<NSIGMA; kk++) {
         Pyy[ii][jj] += wc[kk] * (sigmaYplus[ii][kk] - ypred[ii]) * (sigmaYplus[jj][kk] - ypred[jj]);
@@ -426,18 +388,13 @@ static void estimatorBoldermanPredict(float dt, float thrust)
 static void estimatorBoldermanDynMeas(void)
 {
   // UKF UPDATE OF THE STATE
-  // Slightly different depending on whether position information available
-  if (NOUT == 3) {
-    // Update using only acceleration measurements
-    for (int ii = 0; ii<N; ii++) {
-      x[ii] = xpred[ii] + (k[ii][0]*(y[0][0]-ypred[0]) + k[ii][1]*(y[0][1]-ypred[1]) + k[ii][2]*(y[0][2]-ypred[2]));
-    }
-  } else if (NOUT == 6){
-    // Update using acceleration and position measurements
-    for (int ii = 0; ii<N; ii++) {
-      x[ii] = xpred[ii] + (k[ii][0]*(y[3][0]-ypred[0]) + k[ii][1]*(y[3][1]-ypred[1]) + k[ii][2]*(y[3][2]-ypred[2]) + k[ii][3]*(y[0][0]-ypred[3]) + k[ii][4]*(y[0][1]-ypred[4]) + k[ii][5]*(y[0][2]-ypred[5]) );
+  for (int ii=0; ii<N; ii++) {    // Difference with/without posiotion measurement not needed (K depends on measurement)
+    x[ii] = xpred[ii];
+    for (int jj=0; jj<NOUT; jj++) {
+      x[ii] += k[ii][jj] * (y[jj]-ypred[jj]);
     }
   }
+
   // UKF UPDATE OF THE STATE COVARIANCE
   // Pxxnew = Pxx - K Pyy K'
   static float KPyy[N][NOUT];
@@ -465,33 +422,33 @@ static void estimatorBoldermanDynMeas(void)
 static void estimatorBoldermanStateSave(state_t *state, uint32_t osTick)
 {
   // Input here the method to save the improved estimation in the variable state...
-  // Postion
+  // Postion -> GLOBAL FRAME
   state->position = (point_t) {
     .timestamp = osTick,
     .x = x[0],
     .y = x[1],
     .z = x[2]
   };
-  // Velocity
+  // Velocity -> GLOBAL FRAME
   state->velocity = (velocity_t) {
     .timestamp = osTick,
     .x = x[3],
     .y = x[4],
     .z = x[5]
   };
-  // Acceleration (without the gravity and in unit G)
+  // Acceleration -> GLOBAL FRAME (without the gravity and in unit G)
   state->acc = (acc_t) {
     .timestamp = osTick,
-    .x = ((x[6]) / CONTROL_TO_ACC),
-    .y = ((x[7]) / CONTROL_TO_ACC),
-    .z = ((x[8] + GRAVITY_MAGNITUDE) / CONTROL_TO_ACC)
+    .x = ((x[6]) / GRAVITY_MAGNITUDE),
+    .y = ((x[7]) / GRAVITY_MAGNITUDE),
+    .z = ((x[8]) / GRAVITY_MAGNITUDE)
   };
   // Attitude
   // STATED IN stabilizer_types.h AS LEGACY CF2 BODY COORDINATES, WHERE PITCH IS INVERTED????????
   state->attitude = (attitude_t) {
     .timestamp = osTick,
     .roll = (x[9] * RAD_TO_DEG),
-    .pitch = 1/(x[10] * RAD_TO_DEG),
+    .pitch = -1.0f*(x[10] * RAD_TO_DEG),
     .yaw = (x[11] * RAD_TO_DEG)
   };
 }
@@ -514,13 +471,18 @@ static void resetPxx(void) {
   for (int ii = 0; ii<N; ii++) {
     for (int jj = 0; jj<N; jj++) {
       if (ii == jj) {
-        Pxx[ii][jj] = 0.1;
+        if(ii > 8) {
+          Pxx[ii][jj] = 0.1f;
+        } else {
+          Pxx[ii][jj] = 1.0f;
+        }
       } else {
-        Pxx[ii][jj] = 0.0;
+        Pxx[ii][jj] = 0.0f;
       }
     }
   }
 }
+
 
 // Initializing function; is called first, necessary to perform the estimation
 void estimatorBoldermanInit(void) {
@@ -540,10 +502,10 @@ void estimatorBoldermanInit(void) {
   thrustAccumulator = 0;
   thrustAccumulatorCount = 0;
 
-  // Initialize the variables necessary for UKF (declared above)
+  // LAMBDA scaling parameter
   lambda = alpha*alpha*(N+kappa)-N;
 
-  // Weights for computing mean and covariance
+  // WEIGHTS for computing mean and covariance
   for (int ii = 0; ii<NSIGMA; ii++) {
     if (ii == 0) {
       wc[ii] = lambda/(N+lambda) + (1-alpha*alpha+beta);
@@ -553,26 +515,39 @@ void estimatorBoldermanInit(void) {
       wm[ii] = 1/(2*(N+lambda));
     }
   }
+
+  // INITIAL state estimate
+  /*
+  x
+  */
+
+  // COVARIANCES
+  /*
+  Pxx =
+  q =
+  r =
+  */
+
   // Noise definitions
   // covariance process noise; q
   // Use same for loop to immediately initialize x and xpred
   // Also initialize the sigmapoints to zero
   for (int ii = 0; ii<N; ii++) {
-    x[ii] = 0;
-    q[ii][ii] = (1/100)*0.01;
+    x[ii] = 0.0f;
+    q[ii][ii] = (1/100)*1.0f;
   }
   // covariance measurement noise; r
   // Use same for loop to immediately initialize ypred, which should be done using output equations
   // Also initialize the output of the sigmapoints to zero
   for (int ii = 0; ii<NOUT; ii++) {
-    r[ii][ii] = 0.001;
+    r[ii][ii] = 0.1f;
   }
 
 
   // Provide the boolean stating the initialization is performed
   isInit = true;
   // Provide user with information about the initialization
-  consolePrintf("Initializing the estimator finished");
+  consolePrintf(" -> Initializing the estimator finished. ");
 }
 
 
@@ -621,31 +596,27 @@ int cholesky_decomposition(float (*A)[N], float (*R)[N], int n)
 }
 
 // State all wanted outputs, which can be plotted on the crazyflie client
-// SAVE ALL STATE VARIABLES
-LOG_GROUP_START(BOLDERMAN_ESTIMATION)
-  LOG_ADD(LOG_FLOAT, pos_x, &x[0])
-  LOG_ADD(LOG_FLOAT, pos_y, &x[1])
-  LOG_ADD(LOG_FLOAT, pos_z, &x[2])
-  LOG_ADD(LOG_FLOAT, vel_x, &x[3])
-  LOG_ADD(LOG_FLOAT, vel_y, &x[4])
-  LOG_ADD(LOG_FLOAT, vel_z, &x[5])
-  LOG_ADD(LOG_FLOAT, acc_x, &x[6])
-  LOG_ADD(LOG_FLOAT, acc_y, &x[7])
-  LOG_ADD(LOG_FLOAT, acc_z, &x[8])
-  LOG_ADD(LOG_FLOAT, roll, &x[9])
-  LOG_ADD(LOG_FLOAT, pitch, &x[10])
-  LOG_ADD(LOG_FLOAT, yaw, &x[11])
-LOG_GROUP_STOP(BOLDERMAN_ESTIMATION)
-
-// SAVE ALL MEASUREMENTS
-LOG_GROUP_START(BOLDERMAN_MEASUREMENTS)
-  LOG_ADD(LOG_FLOAT, acc_x, &y[0][0])
-  LOG_ADD(LOG_FLOAT, acc_y, &y[0][1])
-  LOG_ADD(LOG_FLOAT, acc_z, &y[0][2])
-  LOG_ADD(LOG_FLOAT, mag_x, &y[1][0])
-  LOG_ADD(LOG_FLOAT, mag_y, &y[1][1])
-  LOG_ADD(LOG_FLOAT, mag_z, &y[1][2])
-  LOG_ADD(LOG_FLOAT, gyr_x, &y[2][0])
-  LOG_ADD(LOG_FLOAT, gyr_y, &y[2][1])
-  LOG_ADD(LOG_FLOAT, gyr_z, &y[2][2])
-LOG_GROUP_STOP(BOLDERMAN_MEASUREMENTS)
+// Estimation group
+LOG_GROUP_START(BOLDERMAN_est)
+  LOG_ADD(LOG_FLOAT, pos_x_est,  &x[0])
+  LOG_ADD(LOG_FLOAT, pos_y_est,  &x[1])
+  LOG_ADD(LOG_FLOAT, pos_z_est,  &x[2])
+  LOG_ADD(LOG_FLOAT, vel_x_est,  &x[3])
+  LOG_ADD(LOG_FLOAT, vel_y_est,  &x[4])
+  LOG_ADD(LOG_FLOAT, vel_z_est,  &x[5])
+  LOG_ADD(LOG_FLOAT, acc_x_est,  &x[6])
+  LOG_ADD(LOG_FLOAT, acc_y_est,  &x[7])
+  LOG_ADD(LOG_FLOAT, acc_z_est,  &x[8])
+  LOG_ADD(LOG_FLOAT, roll_est,   &x[9])
+  LOG_ADD(LOG_FLOAT, pitch_est,  &x[10])
+  LOG_ADD(LOG_FLOAT, yaw_est,    &x[11])
+LOG_GROUP_STOP(BOLDERMAN_est)
+// Measurement group
+LOG_GROUP_START(BOLDERMAN_meas)
+  LOG_ADD(LOG_FLOAT, acc_x_meas, &y[0])
+  LOG_ADD(LOG_FLOAT, acc_y_meas, &y[1])
+  LOG_ADD(LOG_FLOAT, acc_z_meas, &y[2])
+  LOG_ADD(LOG_FLOAT, gyr_x_meas, &omega[0])
+  LOG_ADD(LOG_FLOAT, gyr_y_meas, &omega[1])
+  LOG_ADD(LOG_FLOAT, gyr_z_meas, &omega[2])
+LOG_GROUP_STOP(BOLDERMAN_meas)
