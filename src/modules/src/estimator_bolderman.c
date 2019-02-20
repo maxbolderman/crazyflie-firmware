@@ -71,6 +71,10 @@ static float k[N][NOUT];                    // Kalman gain (Pxy * inv(Pyy))
 static bool fly = false;                    // Boolean stating that the crazyflie flying or not
 static float y[NOUT];                       // Measurement vectors (just to show how to use static variables)
 static float omega[3];                      // Gyroscopic measurements
+// The following arrays help with initializing Pxx, and defining q and r
+static float Pxxdiag[N]  = {1.0,1.0,1.0, 0.1,0.1,0.1, 0.1,0.1,0.1, 0.01,0.01,0.01};
+static float qdiag[N]    = {0.1,0.1,0.1, 0.1,0.1,0.1, 0.1,0.1,0.1, 0.01,0.01,0.01};
+static float rdiag[NOUT] = {0.01, 0.01, 0.01};
 
 // Functions used for multiplication
 static inline void mat_trans(const arm_matrix_instance_f32 * pSrc, arm_matrix_instance_f32 * pDst)
@@ -468,14 +472,10 @@ bool estimatorBoldermanTest(void)
 
 // Sometimes Pxx needs to be reinitilized
 static void resetPxx(void) {
-  for (int ii = 0; ii<N; ii++) {
-    for (int jj = 0; jj<N; jj++) {
+  for (int ii=0; ii<N; ii++) {
+    for (int jj=0; jj<N; jj++) {
       if (ii == jj) {
-        if(ii > 8) {
-          Pxx[ii][jj] = 0.1f;
-        } else {
-          Pxx[ii][jj] = 1.0f;
-        }
+        Pxx[ii][jj] = Pxxdiag[ii];
       } else {
         Pxx[ii][jj] = 0.0f;
       }
@@ -518,29 +518,39 @@ void estimatorBoldermanInit(void) {
 
   // INITIAL state estimate
   /*
-  x
+  x = {0,0,0, 0,0,0, 0,0,0, 0,0,0};
   */
 
   // COVARIANCES
-  /*
-  Pxx =
-  q =
-  r =
-  */
-
-  // Noise definitions
-  // covariance process noise; q
-  // Use same for loop to immediately initialize x and xpred
-  // Also initialize the sigmapoints to zero
-  for (int ii = 0; ii<N; ii++) {
-    x[ii] = 0.0f;
-    q[ii][ii] = (1/100)*1.0f;
+  // Estimation covariance
+  for (int ii=0; ii<N; ii++) {
+    for (int jj=0; jj<N; jj++) {
+      if (ii == jj) {
+        Pxx[ii][jj] = Pxxdiag[ii];
+      } else {
+        Pxx[ii][jj] = 0.0f;
+      }
+    }
   }
-  // covariance measurement noise; r
-  // Use same for loop to immediately initialize ypred, which should be done using output equations
-  // Also initialize the output of the sigmapoints to zero
-  for (int ii = 0; ii<NOUT; ii++) {
-    r[ii][ii] = 0.1f;
+  // Process noise covariance
+  for (int ii=0; ii<N; ii++) {
+    for (int jj=0; jj<N; jj++) {
+      if (ii == jj) {
+        q[ii][jj] = qdiag[ii];
+      } else {
+        q[ii][jj] = 0.0f;
+      }
+    }
+  }
+  // Measurement noise covariance
+  for (int ii=0; ii<NOUT; ii++) {
+    for (int jj=0; jj<NOUT; jj++) {
+      if (ii == jj) {
+        r[ii][jj] = rdiag[ii];
+      } else {
+        r[ii][jj] = 0.0f;
+      }
+    }
   }
 
 
@@ -549,6 +559,8 @@ void estimatorBoldermanInit(void) {
   // Provide user with information about the initialization
   consolePrintf(" -> Initializing the estimator finished. ");
 }
+
+
 
 
 /*  CHOLESKY DECOMPOSITION
@@ -573,23 +585,23 @@ int cholesky_decomposition(float (*A)[N], float (*R)[N], int n)
    * Written by Marcus Greiff 17/02/2019 based on Numerical Linear
    * Algebra, Lloyd N. Trefethen.
    ***********************************************************************/
-  int ii, jj, i, j, k;
+  int ii, jj, i, j, q;
   for (ii = 0; ii < n; ii++){
     for (jj = ii; jj < n; jj++){
       R[jj][ii] = 0;
       R[ii][jj] = A[ii][jj];
     }
   }
-  for (k = 0; k < n; k++){
-    for (j = k+1; j<n; j++){
+  for (q = 0; q < n; q++){
+    for (j = q+1; j<n; j++){
       for (i = j; i < n; i++){
-        if (assert_element(R[k][k])){return 0;}
-        R[j][i] -= R[k][i]*R[k][j]/R[k][k];
+        if (assert_element(R[q][q])){return 0;}
+        R[j][i] -= R[q][i]*R[q][j]/R[q][q];
       }
     }
-    for (i = n-1; i>=k; i--){
-      if (assert_element(R[k][k])){return 0;}
-      R[k][i] /= sqrtf(R[k][k]);
+    for (i = n-1; i>=q; i--){
+      if (assert_element(R[q][q])){return 0;}
+      R[q][i] /= sqrtf(R[q][q]);
     }
   }
   return 1;
