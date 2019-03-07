@@ -1,3 +1,16 @@
+/*
+CRAZYFLIE-FIRMWARE
+this model implements the UKF with position measurements to perform a state estimation
+for the quadcopter.
+The model implemented is the following:
+- INPUT
+    - Thurst
+    - Gyroscopic measurements
+- OUTPUT
+    - Position
+    - Acceleration (in body coordinates + gravity)
+*/
+
 // Include all libraries / files used here
 #include "estimator_bolderman.h"    // header file
 
@@ -209,10 +222,6 @@ static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, 
   omega[0] = gyro->x;   // ACTUALLY MEASUREMENT, USED AS INPUT!
   omega[1] = gyro->y;
   omega[2] = gyro->z;
-  // If the quadcopter was not flying, it will if thrust exceeds gravity
-  if ((fly == 0) && (thrustAccumulator > GRAVITY_MAGNITUDE)) {
-    fly = 1;
-  }
 
 
   /* The following things are performed here:
@@ -267,18 +276,22 @@ static void estimatorBoldermanPredict(float dt, float thrust)
 
   // integrate one timestep
   for (int ii = 0; ii<NSIGMA; ii++) {   // Integrate one step (somewhat different when position measurement is available)
+    if (thrust > GRAVITY_MAGNITUDE) {
+      fly = 1;
+    }
+
     // Adjust value of pitch IF == PI/2 + n*pi
-    if (1/cosf(sigmaX[10][ii]) > UPPERBOUND) {
+    if (1.0f/cosf(sigmaX[10][ii]) > UPPERBOUND) {
       if (sinf(sigmaX[10][ii]) > 0.0f) {
-        sigmaX[10][ii] = acosf(1/UPPERBOUND);
+        sigmaX[10][ii] = acosf(1.0f/UPPERBOUND);
       } else {
-        sigmaX[10][ii] = -acosf(1/UPPERBOUND);
+        sigmaX[10][ii] = -acosf(1.0f/UPPERBOUND);
       }
-    } else if (1/cosf(sigmaX[10][ii]) < -UPPERBOUND) {
+    } else if (1.0f/cosf(sigmaX[10][ii]) < -UPPERBOUND) {
       if (sinf(sigmaX[10][ii]) > 0.0f) {
-        sigmaX[10][ii] = PI - acosf(1/UPPERBOUND);
+        sigmaX[10][ii] = PI - acosf(1.0f/UPPERBOUND);
       } else {
-        sigmaX[10][ii] = -PI + acosf(1/UPPERBOUND);
+        sigmaX[10][ii] = -PI + acosf(1.0f/UPPERBOUND);
       }
     }
 
@@ -308,18 +321,18 @@ static void estimatorBoldermanPredict(float dt, float thrust)
     if (fly == 0) {
       sigmaXplus[0][ii] = sigmaX[0][ii];
       sigmaXplus[1][ii] = sigmaX[1][ii];
-      sigmaXplus[2][ii] = 0;                // Quadcopter does not lift !
+      sigmaXplus[2][ii] = 0.0f;                // Quadcopter does not lift !
       // Velocity
-      sigmaXplus[3][ii] = 0;
-      sigmaXplus[4][ii] = 0;
-      sigmaXplus[5][ii] = 0;
+      sigmaXplus[3][ii] = 0.0f;
+      sigmaXplus[4][ii] = 0.0f;
+      sigmaXplus[5][ii] = 0.0f;
       // Acceleration
-      sigmaXplus[6][ii] = 0;
-      sigmaXplus[7][ii] = 0;
-      sigmaXplus[8][ii] = 0;                // Hence no accelleration to (ground defines height)
+      sigmaXplus[6][ii] = 0.0f;
+      sigmaXplus[7][ii] = 0.0f;
+      sigmaXplus[8][ii] = 0.0f;                // Hence no accelleration to (ground defines height)
       // Attitude
-      sigmaXplus[9][ii]  = 0;
-      sigmaXplus[10][ii] = 0;
+      sigmaXplus[9][ii]  = 0.0f;
+      sigmaXplus[10][ii] = 0.0f;
       sigmaXplus[11][ii] = sigmaX[11][ii];  // Yaw is not influenced by ground
     }
     // Now compute the output vector
@@ -428,7 +441,7 @@ static void estimatorBoldermanDynMeas(void)
     tracePxx += Pxx[ii][ii];
   }
   if (tracePxx > UPPERBOUND_TRACE) {
-    consolePrintf("Trace too high, resetting Pxx. \n")
+    consolePrintf("Trace too high, resetting Pxx. \n");
     resetPxx();
     tracePxx = 0.0f;
     for (int ii=0; ii<N; ii++) {
