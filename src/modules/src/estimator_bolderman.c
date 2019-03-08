@@ -213,9 +213,9 @@ void estimatorBolderman(state_t *state, sensorData_t *sensors, control_t *contro
 static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, Axis3f *gyro, Axis3f *mag, float dt, uint32_t osTick)
 {
   // Store the measuremets y1 y2 y3 as rows in a matrix
-  y[0] = mag->x;    // SHOULD BE CHANGED TO POSITION MEASUREMENT
-  y[1] = mag->y;
-  y[2] = mag->z;
+  y[0] = 0.0f;    // SHOULD BE CHANGED TO POSITION MEASUREMENT
+  y[1] = 0.0f;
+  y[2] = 0.0f;
   y[3] = acc->x;
   y[4] = acc->y;
   y[5] = acc->z;
@@ -349,6 +349,28 @@ static void estimatorBoldermanPredict(float dt, float thrust)
     xpred[ii] = 0.0f;
     for (int jj=0; jj<NSIGMA; jj++) {
       xpred[ii] += wm[jj]*sigmaXplus[ii][jj];
+    }
+  }
+  // Exerting the bounds
+  while ((xpred[9] > PI) || (xpred[9] < -PI)) {
+    if (xpred[9] > PI) {
+      xpred[9] -= 2*PI;
+    } else if (xpred[9] < -PI) {
+      xpred[9] += 2*PI;
+    }
+  }
+  while ((xpred[10] > PI) || (xpred[10] < -PI)) {
+    if (xpred[10] > PI) {
+      xpred[10] -= 2*PI;
+    } else if (xpred[10] < -PI) {
+      xpred[10] += 2*PI;
+    }
+  }
+  while ((xpred[11] > PI) || (xpred[11] < -PI)) {
+    if (xpred[11] > PI) {
+      xpred[11] -= 2*PI;
+    } else if (xpred[11] < -PI) {
+      xpred[11] += 2*PI;
     }
   }
   for (int ii=0; ii<NOUT; ii++) {   // Predicted output
