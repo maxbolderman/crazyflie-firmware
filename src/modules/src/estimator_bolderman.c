@@ -1,14 +1,13 @@
 /*
-CRAZYFLIE-FIRMWARE
+CRAZYFLIE-FIRMWAREACC
 this model implements the UKF with position measurements to perform a state estimation
 for the quadcopter.
 The model implemented is the following:
 - INPUT
-    - Thurst
+    - Acceleration measurements
     - Gyroscopic measurements
 - OUTPUT
     - Position
-    - Acceleration (in body coordinates + gravity)
 */
 
 // Include all libraries / files used here
@@ -35,15 +34,16 @@ The model implemented is the following:
 #define CRAZYFLIE_WEIGHT_grams (27.0f)    // Weight of crazyflie
 #define CONTROL_TO_ACC (GRAVITY_MAGNITUDE*60.0f/CRAZYFLIE_WEIGHT_grams/65536.0f)
                 // variable defining the factor from control input to acceleration
-#define N 12                              // Dimension of system
-#define NOUT 6                            // Dimension of measurement
+#define N 9                               // Dimension of system
+#define NOUT 3                            // Dimension of measurement
 #define NSIGMA (2*N+1)                    // Number of sigma points
-#define NCALC 12.0f                       // Dimension as a float
+#define NCALC 9.0f                       // Dimension as a float
 // Output = [ax, ay, az] --> acceleration in body coordinates
 // Output = [x, y, z, ax, ay, az] --> position in global coordinates and acceleration in body coordinates
 #define UPPERBOUND 10000.0f                  // Upperbound after which inversion is adjusted
 #define UPPERBOUND_TRACE 100.0f
 #define TS (1.0f/100.0f)
+#define UPPERBOUND_DT 0.1f                // Upperbound of the timestep
 
 /*******************************************************************************
 *   Internal variables for the estimator
@@ -64,7 +64,7 @@ static uint32_t gyroAccumulatorCount;       // Count variable, number of samples
 static uint32_t magAccumulatorCount;        // Count variable, number of samples of which angular acceleration measurement is summed
 static uint32_t thrustAccumulatorCount;     // Count variable, number of samples of which thrust is summed
 // Extra variables used in the Unscented Kalman Filter
-static float alpha = 0.01f;                // Defines spread of sigma points
+static float alpha = 0.1f;                // Defines spread of sigma points
 static float kappa = 0.0f;                  // Secondary scaling factor
 static float beta = 2.0f;                   // Distributation parameter, gaussion := 2
 static float lambda;                        // Scaling parameter used for determining: Weights and Sigma points
@@ -84,14 +84,14 @@ static float Pxy[N][NOUT];                  // Covariance of state - outputs
 static float Pyy[NOUT][NOUT];               // Covariance of ouput
 static float Pyyinv[NOUT][NOUT];            // Inverse of Pyy
 static float k[N][NOUT];                    // Kalman gain (Pxy * inv(Pyy))
-static uint8_t fly = 0;                    // Boolean stating that the crazyflie flying or not
 static float y[NOUT];                       // Measurement vectors (just to show how to use static variables)
 static float omega[3];                      // Gyroscopic measurements
+static float acceleration[3];               // Acceleration measurements
 static float tracePxx;                      // Trace of the covariance matrix Pxx
 // The following arrays help with initializing Pxx, and defining q and r
-static float Pxxdiag[N]  = {1.0f,1.0f,1.0f, 1.0f,1.0f,1.0f, 1.0f,1.0f,1.0f, 1.0f,1.0f,1.0f};
-static float qdiag[N]    = {TS*0.001f,TS*0.001f,TS*0.001f, TS*0.01f,TS*0.01f,TS*0.01f, TS*0.001f,TS*0.001f,TS*0.001f, TS*0.01f,TS*0.01f,TS*0.01f};
-static float rdiag[NOUT] = {0.01f,0.01f,0.01f, 0.001f,0.001f,0.001f};
+static float Pxxdiag[N]  = {1.0f,1.0f,1.0f, 0.1f,0.1f,0.1f, 0.01f,0.01f,0.01f};
+static float qdiag[N]    = {TS*0.001f,TS*0.001f,TS*0.001f, TS*0.01f,TS*0.01f,TS*0.01f, TS*0.01f,TS*0.01f,TS*0.01f};
+static float rdiag[NOUT] = {0.001f,0.001f,0.001f};
 
 // Functions used for multiplication
 static inline void mat_trans(const arm_matrix_instance_f32 * pSrc, arm_matrix_instance_f32 * pDst)
@@ -190,7 +190,9 @@ void estimatorBolderman(state_t *state, sensorData_t *sensors, control_t *contro
 
     // Computes the time step used
     float dt = (float)(osTick-lastPrediction)/configTICK_RATE_HZ;
-
+    if (dt > UPPERBOUND_DT) {
+      consolePrintf("dt exceeds upperbound \n");
+    }
 
 
     // This is where we perform the time-integration of the state estimate
@@ -216,10 +218,10 @@ static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, 
   y[0] = 0.0f;    // SHOULD BE CHANGED TO POSITION MEASUREMENT
   y[1] = 0.0f;
   y[2] = 0.0f;
-  y[3] = acc->x;
-  y[4] = acc->y;
-  y[5] = acc->z;
-  omega[0] = gyro->x;   // ACTUALLY MEASUREMENT, USED AS INPUT!
+  acceleration[0] = acc->x;
+  acceleration[1] = acc->y;
+  acceleration[2] = acc->z;
+  omega[0] = gyro->x;
   omega[1] = gyro->y;
   omega[2] = gyro->z;
 
@@ -276,72 +278,43 @@ static void estimatorBoldermanPredict(float dt, float thrust)
 
   // integrate one timestep
   for (int ii = 0; ii<NSIGMA; ii++) {   // Integrate one step (somewhat different when position measurement is available)
-    if ((thrust > GRAVITY_MAGNITUDE) || (sigmaX[2][ii]>0.0f)) {
-      fly = 1;
-    }
-
     // Adjust value of pitch IF == PI/2 + n*pi
-    if (1.0f/cosf(sigmaX[10][ii]) > UPPERBOUND) {
-      if (sinf(sigmaX[10][ii]) > 0.0f) {
-        sigmaX[10][ii] = acosf(1.0f/UPPERBOUND);
+    if (1.0f/cosf(sigmaX[7][ii]) > UPPERBOUND) {
+      if (sinf(sigmaX[7][ii]) > 0.0f) {
+        sigmaX[7][ii] = acosf(1.0f/UPPERBOUND);
       } else {
-        sigmaX[10][ii] = -acosf(1.0f/UPPERBOUND);
+        sigmaX[7][ii] = -acosf(1.0f/UPPERBOUND);
       }
-    } else if (1.0f/cosf(sigmaX[10][ii]) < -UPPERBOUND) {
-      if (sinf(sigmaX[10][ii]) > 0.0f) {
-        sigmaX[10][ii] = PI - acosf(1.0f/UPPERBOUND);
+    } else if (1.0f/cosf(sigmaX[7][ii]) < -UPPERBOUND) {
+      if (sinf(sigmaX[7][ii]) > 0.0f) {
+        sigmaX[7][ii] = PI - acosf(1.0f/UPPERBOUND);
       } else {
-        sigmaX[10][ii] = -PI + acosf(1.0f/UPPERBOUND);
+        sigmaX[7][ii] = -PI + acosf(1.0f/UPPERBOUND);
       }
     }
 
-    // Update the sigmapoints (discretized using forward euler)
-    // Furthermore, note that the gyroscopic measurements are directly send through the dynamics as an input
-    if (fly==1) {
-      sigmaXplus[0][ii] = sigmaX[0][ii] + dt*sigmaX[3][ii];
-      sigmaXplus[1][ii] = sigmaX[1][ii] + dt*sigmaX[4][ii];
-      sigmaXplus[2][ii] = sigmaX[2][ii] + dt*sigmaX[5][ii];
-      // Velocity
-      sigmaXplus[3][ii] = sigmaX[3][ii] + dt*thrust*(cosf(sigmaX[11][ii])*sinf(sigmaX[10][ii])*cosf(sigmaX[9][ii]) + sinf(sigmaX[9][ii])*sinf(sigmaX[11][ii]));
-      sigmaXplus[4][ii] = sigmaX[4][ii] + dt*thrust*(sinf(sigmaX[11][ii])*sinf(sigmaX[10][ii])*cosf(sigmaX[9][ii]) - cosf(sigmaX[11][ii])*sinf(sigmaX[9][ii]));
-      sigmaXplus[5][ii] = sigmaX[5][ii] + dt*(-GRAVITY_MAGNITUDE + thrust*(cosf(sigmaX[9][ii])*cosf(sigmaX[10][ii])));
-      // Acceleration (is the same as the additionstep above divided by dt)
-      // This one might be tricky -> actually average acceleration from [k, k+1] -> IS THE SAME AS THE MEASUREMENT
-      sigmaXplus[6][ii] = (sigmaXplus[3][ii]-sigmaX[3][ii])/dt;
-      sigmaXplus[7][ii] = (sigmaXplus[4][ii]-sigmaX[4][ii])/dt;
-      sigmaXplus[8][ii] = (sigmaXplus[5][ii]-sigmaX[5][ii])/dt;
-      // Attitude
-      sigmaXplus[9][ii]  = sigmaX[9][ii]  + (dt/cosf(sigmaX[10][ii])) * (cosf(sigmaX[10][ii])*omega[0] + sinf(sigmaX[10][ii])*sinf(sigmaX[9][ii])*omega[1] + sinf(sigmaX[10][ii])*cosf(sigmaX[9][ii])*omega[2]);
-      sigmaXplus[10][ii] = sigmaX[10][ii] + (dt/cosf(sigmaX[10][ii])) * (cosf(sigmaX[10][ii])*cosf(sigmaX[9][ii])*omega[1] - cosf(sigmaX[10][ii])*sinf(sigmaX[9][ii])*omega[2]);
-      sigmaXplus[11][ii] = sigmaX[11][ii] + (dt/cosf(sigmaX[10][ii])) * (sinf(sigmaX[9][ii])*omega[1] + cosf(sigmaX[9][ii])*omega[2]);
-    }
-    if (sigmaXplus[2][ii] < 0) {   // When landend (can only be done when position measurement is available, otherwise positions will drift)
-      fly = 0;
-    }
-    if (fly == 0) {
-      sigmaXplus[0][ii] = sigmaX[0][ii];
-      sigmaXplus[1][ii] = sigmaX[1][ii];
-      sigmaXplus[2][ii] = 0.0f;                // Quadcopter does not lift !
-      // Velocity
-      sigmaXplus[3][ii] = 0.0f;
-      sigmaXplus[4][ii] = 0.0f;
-      sigmaXplus[5][ii] = 0.0f;
-      // Acceleration
-      sigmaXplus[6][ii] = 0.0f;
-      sigmaXplus[7][ii] = 0.0f;
-      sigmaXplus[8][ii] = 0.0f;                // Hence no accelleration to (ground defines height)
-      // Attitude
-      sigmaXplus[9][ii]  = 0.0f;
-      sigmaXplus[10][ii] = 0.0f;
-      sigmaXplus[11][ii] = sigmaX[11][ii];  // Yaw is not influenced by ground
-    }
+    // Update the sigmapoints (analytical discretization, constant input inbetween samples)
+    // Attitude
+    sigmaXplus[6][ii] = sigmaX[6][ii] + (dt/cosf(sigmaX[7][ii])) * (cosf(sigmaX[7][ii])*omega[0] + sinf(sigmaX[7][ii])*sinf(sigmaX[6][ii])*omega[1] + sinf(sigmaX[7][ii])*cosf(sigmaX[6][ii])*omega[2]);
+    sigmaXplus[7][ii] = sigmaX[7][ii] + (dt/cosf(sigmaX[7][ii])) * (cosf(sigmaX[7][ii])*cosf(sigmaX[6][ii])*omega[1] - cosf(sigmaX[7][ii])*sinf(sigmaX[6][ii])*omega[2]);
+    sigmaXplus[8][ii] = sigmaX[8][ii] + (dt/cosf(sigmaX[7][ii])) * (sinf(sigmaX[6][ii])*omega[1] + cosf(sigmaX[6][ii])*omega[2]);
+    // Acceleration corrected (measurement rotated and gravity substracted)
+    static float acccor[3];
+    acccor[0] = cosf(sigmaX[6][ii])*cosf(sigmaX[8][ii])*acceleration[0] + (cosf(sigmaX[8][ii])*sinf(sigmaX[7][ii])*sinf(sigmaX[6][ii])-cosf(sigmaX[6][ii])*sinf(sigmaX[8][ii]))*acceleration[1] + (cosf(sigmaX[8][ii])*sinf(sigmaX[7][ii])*cosf(sigmaX[6][ii])+sinf(sigmaX[6][ii])*sinf(sigmaX[8][ii]))*acceleration[2];
+    acccor[1] = sinf(sigmaX[8][ii])*cosf(sigmaX[6][ii])*acceleration[0] + (sinf(sigmaX[8][ii])*sinf(sigmaX[7][ii])*sinf(sigmaX[6][ii])+cosf(sigmaX[6][ii])*cosf(sigmaX[8][ii]))*acceleration[1] + (sinf(sigmaX[8][ii])*sinf(sigmaX[7][ii])*cosf(sigmaX[6][ii])-sinf(sigmaX[6][ii])*cosf(sigmaX[8][ii]))*acceleration[2];
+    acccor[2] = -sinf(sigmaX[7][ii])*acceleration[0] + cosf(sigmaX[7][ii])*sinf(sigmaX[6][ii])*acceleration[1] + cosf(sigmaX[7][ii])*cosf(sigmaX[6][ii])*acceleration[2] - GRAVITY_MAGNITUDE;
+    // Velocity
+    sigmaXplus[3][ii] = sigmaX[3][ii] + dt*acccor[0];
+    sigmaXplus[4][ii] = sigmaX[4][ii] + dt*acccor[1];
+    sigmaXplus[5][ii] = sigmaX[5][ii] + dt*acccor[2];
+    // Position
+    sigmaXplus[0][ii] = sigmaX[0][ii] + dt*sigmaX[3][ii] + 0.5f*dt*dt*acccor[0];
+    sigmaXplus[1][ii] = sigmaX[0][ii] + dt*sigmaX[4][ii] + 0.5f*dt*dt*acccor[1];
+    sigmaXplus[2][ii] = sigmaX[0][ii] + dt*sigmaX[5][ii] + 0.5f*dt*dt*acccor[2];
     // Now compute the output vector
     sigmaYplus[0][ii] = sigmaXplus[0][ii];
     sigmaYplus[1][ii] = sigmaXplus[1][ii];
     sigmaYplus[2][ii] = sigmaXplus[2][ii];
-    sigmaYplus[3][ii] = cosf(sigmaXplus[9][ii])*cosf(sigmaXplus[11][ii])*sigmaXplus[6][ii] + cosf(sigmaXplus[9][ii])*sinf(sigmaXplus[11][ii])*sigmaXplus[7][ii] - sinf(sigmaXplus[10][ii])*(sigmaXplus[8][ii]+GRAVITY_MAGNITUDE);
-    sigmaYplus[4][ii] = (cosf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*sinf(sigmaXplus[9][ii])-cosf(sigmaXplus[9][ii])*sinf(sigmaXplus[11][ii]))*sigmaXplus[6][ii] + (sinf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*sinf(sigmaXplus[9][ii])+cosf(sigmaXplus[9][ii])*cosf(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cosf(sigmaXplus[10][ii])*sinf(sigmaXplus[9][ii]))*(sigmaXplus[8][ii]+GRAVITY_MAGNITUDE);
-    sigmaYplus[5][ii] = (cosf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*cosf(sigmaXplus[9][ii])+sinf(sigmaXplus[9][ii])*sinf(sigmaXplus[11][ii]))*sigmaXplus[6][ii] + (sinf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*cosf(sigmaXplus[9][ii])-sinf(sigmaXplus[9][ii])*cosf(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cosf(sigmaXplus[10][ii])*cosf(sigmaXplus[9][ii]))*(sigmaXplus[8][ii]+GRAVITY_MAGNITUDE);
   }
 
   // Calculate the predicted state and the predicted output
@@ -352,25 +325,25 @@ static void estimatorBoldermanPredict(float dt, float thrust)
     }
   }
   // Exerting the bounds
-  while ((xpred[9] > PI) || (xpred[9] < -PI)) {
-    if (xpred[9] > PI) {
-      xpred[9] -= 2*PI;
+  while ((xpred[6] > PI) || (xpred[6] < -PI)) {
+    if (xpred[6] > PI) {
+      xpred[6] -= 2*PI;
     } else if (xpred[9] < -PI) {
-      xpred[9] += 2*PI;
+      xpred[6] += 2*PI;
     }
   }
-  while ((xpred[10] > PI) || (xpred[10] < -PI)) {
-    if (xpred[10] > PI) {
-      xpred[10] -= 2*PI;
+  while ((xpred[7] > PI) || (xpred[7] < -PI)) {
+    if (xpred[7] > PI) {
+      xpred[7] -= 2*PI;
     } else if (xpred[10] < -PI) {
-      xpred[10] += 2*PI;
+      xpred[7] += 2*PI;
     }
   }
-  while ((xpred[11] > PI) || (xpred[11] < -PI)) {
-    if (xpred[11] > PI) {
-      xpred[11] -= 2*PI;
+  while ((xpred[8] > PI) || (xpred[8] < -PI)) {
+    if (xpred[8] > PI) {
+      xpred[8] -= 2*PI;
     } else if (xpred[11] < -PI) {
-      xpred[11] += 2*PI;
+      xpred[8] += 2*PI;
     }
   }
   for (int ii=0; ii<NOUT; ii++) {   // Predicted output
@@ -430,7 +403,7 @@ static void estimatorBoldermanPredict(float dt, float thrust)
 static void estimatorBoldermanDynMeas(void)
 {
   // UKF UPDATE OF THE STATE
-  for (int ii=0; ii<N; ii++) {    // Difference with/without posiotion measurement not needed (K depends on measurement)
+  for (int ii=0; ii<N; ii++) {
     x[ii] = xpred[ii];
     for (int jj=0; jj<NOUT; jj++) {
       x[ii] += k[ii][jj] * (y[jj]-ypred[jj]);
@@ -470,6 +443,7 @@ static void estimatorBoldermanDynMeas(void)
       tracePxx += Pxx[ii][ii];
     }
   }
+
 }
 
 // Save the estimated state in the variable state
@@ -491,19 +465,23 @@ static void estimatorBoldermanStateSave(state_t *state, uint32_t osTick)
     .z = x[5]
   };
   // Acceleration -> GLOBAL FRAME (without the gravity and in unit G)
+  static float accext[3];
+  accext[0] = cosf(x[6])*cosf(x[8])*acceleration[0] + (cosf(x[8])*sinf(x[7])*sinf(x[6])-cosf(x[6])*sinf(x[8]))*acceleration[1] + (cosf(x[8])*sinf(x[7])*cosf(x[6])+sinf(x[6])*sinf(x[8]))*acceleration[2];
+  accext[1] = sinf(x[8])*cosf(x[6])*acceleration[0] + (sinf(x[8])*sinf(x[7])*sinf(x[6])+cosf(x[6])*cosf(x[8]))*acceleration[1] + (sinf(x[8])*sinf(x[7])*cosf(x[6])-sinf(x[6])*cosf(x[8]))*acceleration[2];
+  accext[2] = -sinf(x[7])*acceleration[0] + cosf(x[7])*sinf(x[6])*acceleration[1] + cosf(x[7])*cosf(x[6])*acceleration[2] - GRAVITY_MAGNITUDE;
   state->acc = (acc_t) {
     .timestamp = osTick,
-    .x = ((x[6]) / GRAVITY_MAGNITUDE),
-    .y = ((x[7]) / GRAVITY_MAGNITUDE),
-    .z = ((x[8]) / GRAVITY_MAGNITUDE)
+    .x = ((accext[0]) / GRAVITY_MAGNITUDE),
+    .y = ((accext[1]) / GRAVITY_MAGNITUDE),
+    .z = ((accext[2]) / GRAVITY_MAGNITUDE)
   };
   // Attitude
   // STATED IN stabilizer_types.h AS LEGACY CF2 BODY COORDINATES, WHERE PITCH IS INVERTED????????
   state->attitude = (attitude_t) {
     .timestamp = osTick,
-    .roll = (x[9] * RAD_TO_DEG),
-    .pitch = -1.0f*(x[10] * RAD_TO_DEG),
-    .yaw = (x[11] * RAD_TO_DEG)
+    .roll = (x[6] * RAD_TO_DEG),
+    .pitch = -1.0f*(x[7] * RAD_TO_DEG),
+    .yaw = (x[8] * RAD_TO_DEG)
   };
 }
 
@@ -571,7 +549,7 @@ void estimatorBoldermanInit(void) {
   x = {0,0,0, 0,0,0, 0,0,0, 0,0,0};
   */
 
-  // COVARIANCES
+  // COVARIANCES and INITIAL STATE
   // Estimation covariance
   for (int ii=0; ii<N; ii++) {
     x[ii] = 0.0f;
@@ -687,14 +665,10 @@ LOG_GROUP_STOP(BOLDERMAN_est)
 
 // Measurement group
 LOG_GROUP_START(BOLDERMAN_meas)
-  LOG_ADD(LOG_FLOAT, acc_x_meas, &y[3])
-  LOG_ADD(LOG_FLOAT, acc_y_meas, &y[4])
-  LOG_ADD(LOG_FLOAT, acc_z_meas, &y[5])
+  LOG_ADD(LOG_FLOAT, acc_x_meas, &acceleration[0])
+  LOG_ADD(LOG_FLOAT, acc_y_meas, &acceleration[1])
+  LOG_ADD(LOG_FLOAT, acc_z_meas, &acceleration[2])
   LOG_ADD(LOG_FLOAT, gyr_x_meas, &omega[0])
   LOG_ADD(LOG_FLOAT, gyr_y_meas, &omega[1])
   LOG_ADD(LOG_FLOAT, gyr_z_meas, &omega[2])
 LOG_GROUP_STOP(BOLDERMAN_meas)
-
-PARAM_GROUP_START(BOLDERMAN_param)
-PARAM_ADD(PARAM_UINT8, force_fly, &fly)
-PARAM_GROUP_STOP(BOLDERMAN_param)
