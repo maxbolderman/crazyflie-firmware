@@ -276,7 +276,7 @@ static void estimatorBoldermanPredict(float dt, float thrust)
 
   // integrate one timestep
   for (int ii = 0; ii<NSIGMA; ii++) {   // Integrate one step (somewhat different when position measurement is available)
-    if (thrust > GRAVITY_MAGNITUDE) {
+    if ((thrust > GRAVITY_MAGNITUDE) || (sigmaX[2][ii]>0.0f)) {
       fly = 1;
     }
 
