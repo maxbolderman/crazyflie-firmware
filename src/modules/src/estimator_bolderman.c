@@ -45,6 +45,17 @@ The model implemented is the following:
 #define TS (1.0f/100.0f)
 #define UPPERBOUND_DT 0.1f                // Upperbound of the timestep
 
+//
+#define TWR_MEASUREMENT_QUEUE_LENGTH (10)
+static xQueueHandle twrDataQueue;
+
+bool estimatorBoldermanEnqueueDistance(distanceMeasurement_t *measurement);
+
+static inline bool estimatorHasTWRMeasurement(distanceMeasurement_t *dist) {
+  return (pdTRUE == xQueueReceive(twrDataQueue, dist, 0));
+}
+
+
 /*******************************************************************************
 *   Internal variables for the estimator
 
@@ -84,6 +95,8 @@ static float Pxy[N][NOUT];                  // Covariance of state - outputs
 static float Pyy[NOUT][NOUT];               // Covariance of ouput
 static float Pyyinv[NOUT][NOUT];            // Inverse of Pyy
 static float k[N][NOUT];                    // Kalman gain (Pxy * inv(Pyy))
+static uint8_t ycounter = 0;                // Counter to see how much position measurements have been received
+static float anchor[3][NOUT];               // Anchor positions
 static float y[NOUT];                       // Measurement vectors (just to show how to use static variables)
 static float omega[3];                      // Gyroscopic measurements
 static float acceleration[3];               // Acceleration measurements
@@ -109,6 +122,8 @@ static inline float arm_sqrt(float32_t in)
 static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, Axis3f *gyro, Axis3f *mag, float dt, uint32_t osTick);
 // Prototype of function combining prediction and measurement = actual update
 static void estimatorBoldermanDynMeas(void);
+// Prototype of function setting prediction to estimation (when no position measurement is performed yet)
+static void estimatorBoldermanPredEst(void);
 // Prototype of function saving the updated state
 static void estimatorBoldermanStateSave(state_t *state, uint32_t osTick);
 // Prototype of function defining the dynamics
@@ -214,10 +229,6 @@ void estimatorBolderman(state_t *state, sensorData_t *sensors, control_t *contro
 // Here the integration and the state estimation is performed
 static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, Axis3f *gyro, Axis3f *mag, float dt, uint32_t osTick)
 {
-  // Store the measuremets y1 y2 y3 as rows in a matrix
-  y[0] = 0.0f;    // SHOULD BE CHANGED TO POSITION MEASUREMENT
-  y[1] = 0.0f;
-  y[2] = 0.0f;
   acceleration[0] = acc->x;
   acceleration[1] = acc->y;
   acceleration[2] = acc->z;
@@ -225,6 +236,18 @@ static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, 
   omega[1] = gyro->y;
   omega[2] = gyro->z;
 
+  distanceMeasurement_t dist;
+  while (estimatorHasTWRMeasurement(&dist))
+  {
+    static uint8_t yindex;
+    yindex = ycounter % 3;
+    y[yindex] = dist.distance;
+    anchor[0][yindex] = dist.x;
+    anchor[1][yindex] = dist.y;
+    anchor[2][yindex] = dist.z;
+    ycounter++;
+    //consolePrintf("Queued measurement: %f", (double)distance);
+  }
 
   /* The following things are performed here:
       - a prediction of the state at the current moment is made, using the previous state (note that you need dt)
@@ -238,10 +261,20 @@ static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, 
           * update the covariance matrix Pxx
       - estimation is saved in the state variable, so it can be used by controller
   */
+
+
   // Use dynamics to predict state at next interval
   estimatorBoldermanPredict(dt, thrust);
-  // Use predicted state and measurement to improve Estimation
-  estimatorBoldermanDynMeas();
+  // The update can only be performed when three position measurements are performed
+  if (ycounter >= 3) {
+    // Use predicted state and measurement to improve Estimation
+    estimatorBoldermanDynMeas();
+    ycounter = 0;
+    // Anchor does not need to be resetted, will be overwritten
+  } else {
+    // Set predicted value to estimated (otherwise other measurements will be forgotten)
+    estimatorBoldermanPredEst();
+  }
   // Save new estimation in the state
   estimatorBoldermanStateSave(state, osTick);
 }
@@ -312,9 +345,10 @@ static void estimatorBoldermanPredict(float dt, float thrust)
     sigmaXplus[1][ii] = sigmaX[0][ii] + dt*sigmaX[4][ii] + 0.5f*dt*dt*acccor[1];
     sigmaXplus[2][ii] = sigmaX[0][ii] + dt*sigmaX[5][ii] + 0.5f*dt*dt*acccor[2];
     // Now compute the output vector
-    sigmaYplus[0][ii] = sigmaXplus[0][ii];
-    sigmaYplus[1][ii] = sigmaXplus[1][ii];
-    sigmaYplus[2][ii] = sigmaXplus[2][ii];
+    // Distances with regards to anchor positions
+    sigmaYplus[0][ii] = sqrtf((sigmaXplus[0][ii]-anchor[0][0])*(sigmaXplus[0][ii]-anchor[0][0]) + (sigmaXplus[1][ii]-anchor[1][0])*(sigmaXplus[1][ii]-anchor[1][0]) + (sigmaXplus[2][ii]-anchor[2][0])*(sigmaXplus[2][ii]-anchor[2][0]));
+    sigmaYplus[1][ii] = sqrtf((sigmaXplus[0][ii]-anchor[0][1])*(sigmaXplus[0][ii]-anchor[0][1]) + (sigmaXplus[1][ii]-anchor[1][1])*(sigmaXplus[1][ii]-anchor[1][1]) + (sigmaXplus[2][ii]-anchor[2][1])*(sigmaXplus[2][ii]-anchor[2][1]));
+    sigmaYplus[2][ii] = sqrtf((sigmaXplus[0][ii]-anchor[0][2])*(sigmaXplus[0][ii]-anchor[0][2]) + (sigmaXplus[1][ii]-anchor[1][2])*(sigmaXplus[1][ii]-anchor[1][2]) + (sigmaXplus[2][ii]-anchor[2][2])*(sigmaXplus[2][ii]-anchor[2][2]));
   }
 
   // Calculate the predicted state and the predicted output
@@ -328,21 +362,21 @@ static void estimatorBoldermanPredict(float dt, float thrust)
   while ((xpred[6] > PI) || (xpred[6] < -PI)) {
     if (xpred[6] > PI) {
       xpred[6] -= 2*PI;
-    } else if (xpred[9] < -PI) {
+    } else if (xpred[6] < -PI) {
       xpred[6] += 2*PI;
     }
   }
   while ((xpred[7] > PI) || (xpred[7] < -PI)) {
     if (xpred[7] > PI) {
       xpred[7] -= 2*PI;
-    } else if (xpred[10] < -PI) {
+    } else if (xpred[7] < -PI) {
       xpred[7] += 2*PI;
     }
   }
   while ((xpred[8] > PI) || (xpred[8] < -PI)) {
     if (xpred[8] > PI) {
       xpred[8] -= 2*PI;
-    } else if (xpred[11] < -PI) {
+    } else if (xpred[8] < -PI) {
       xpred[8] += 2*PI;
     }
   }
@@ -443,7 +477,14 @@ static void estimatorBoldermanDynMeas(void)
       tracePxx += Pxx[ii][ii];
     }
   }
+}
 
+static void estimatorBoldermanPredEst(void)
+{
+  for (int ii=0; ii<N; ii++) {
+    // Set the predicted value to the estimated state, since no update can be performed
+    x[ii] = xpred[ii];
+  }
 }
 
 // Save the estimated state in the variable state
@@ -489,7 +530,6 @@ static void estimatorBoldermanStateSave(state_t *state, uint32_t osTick)
 
 
 
-
 /* INITIALIZATION AND TESTING
 */
 // Test function, can test whether the estimatorBolderman is readily initialized
@@ -519,6 +559,10 @@ void estimatorBoldermanInit(void) {
   // Initializing is actually getting the first prediction, defined here
   lastPrediction = xTaskGetTickCount();
 
+  // Define the measurmeent xQueue
+  twrDataQueue = xQueueCreate(TWR_MEASUREMENT_QUEUE_LENGTH, sizeof(distanceMeasurement_t));
+
+
   // Reset accumulators and counters
   // Often theseinverse 3x3 matrix are readily zero, but when starting over, these values need to be resetted
   accAccumulator = (Axis3f){.axis={0}};
@@ -536,7 +580,7 @@ void estimatorBoldermanInit(void) {
   // WEIGHTS for computing mean and covariance
   for (int ii = 0; ii<NSIGMA; ii++) {
     if (ii == 0) {
-      wc[ii] = lambda/(NCALC+lambda) + (1-alpha*alpha+beta);
+      wc[ii] = lambda/(NCALC+lambda) + (1.0f-alpha*alpha+beta);
       wm[ii] = lambda/(NCALC+lambda);
     } else {
       wc[ii] = 1.0f/(2.0f*(NCALC+lambda));
@@ -585,6 +629,13 @@ void estimatorBoldermanInit(void) {
 
   // Provide the boolean stating the initialization is performed
   isInit = true;
+
+  /*distanceMeasurement_t dummyMeasurement;
+  dummyMeasurement.distance=1.0f;
+  estimatorBoldermanEnqueueDistance(&dummyMeasurement);
+  */
+
+  // Store the measuremets y1 y2 y3 as rows in a matrix
   // Provide user with information about the initialization
   consolePrintf(" -> Initializing the estimator finished. ");
 }
@@ -643,6 +694,12 @@ int cholesky_decomposition(float (*A)[N], float (*R)[N], int n)
     }
   }
   return 1;
+}
+
+bool estimatorBoldermanEnqueueDistance(distanceMeasurement_t *measurement)
+{
+  ASSERT(isInit);
+  return xQueueSend(twrDataQueue, measurement, 0);
 }
 
 // State all wanted outputs, which can be plotted on the crazyflie client
