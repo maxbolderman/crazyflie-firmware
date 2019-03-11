@@ -45,7 +45,7 @@ The model implemented is the following:
 #define TS (1.0f/100.0f)
 #define UPPERBOUND_DT 0.1f                // Upperbound of the timestep
 
-//
+// QUEUEING for position measurement 
 #define TWR_MEASUREMENT_QUEUE_LENGTH (10)
 static xQueueHandle twrDataQueue;
 
@@ -236,6 +236,7 @@ static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, 
   omega[1] = gyro->y;
   omega[2] = gyro->z;
 
+  // Get the distance to quadcopter and anchor position
   distanceMeasurement_t dist;
   while (estimatorHasTWRMeasurement(&dist))
   {
@@ -265,7 +266,7 @@ static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, 
 
   // Use dynamics to predict state at next interval
   estimatorBoldermanPredict(dt, thrust);
-  // The update can only be performed when three position measurements are performed
+  // The update can only be performed when at least three position measurements are performed
   if (ycounter >= 3) {
     // Use predicted state and measurement to improve Estimation
     estimatorBoldermanDynMeas();
