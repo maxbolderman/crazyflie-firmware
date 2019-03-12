@@ -48,7 +48,7 @@ The model implemented is the following:
 
 // QUEUEING for position measurement
 #define TWR_MEASUREMENT_QUEUE_LENGTH (10) // Number of measurements maximally in the queue
-static xQueueHandle twrDataQueueu;
+static xQueueHandle twrDataQueue;
 
 // Prototype of function to add measurement to queue
 bool estimatorBoldermanEnqueueDistance(distanceMeasurement_t *measurement);
