@@ -461,12 +461,12 @@ static void estimatorBoldermanDynMeas(void)
     }
   }
   // Define the kalman gain ( K = Pxy * inv(Pyy) )
-  static arm_matrix_instance_f32 Pyym = {NOUT, NOUT, (float *)Pyyhelp};
+  static arm_matrix_instance_f32 Pyymhelp = {NOUT, NOUT, (float *)Pyyhelp};
   static arm_matrix_instance_f32 Pyyinvm = {NOUT, NOUT, (float *)Pyyinv};
   static arm_matrix_instance_f32 Pxym = {N, NOUT, (float *)Pxy};
   static arm_matrix_instance_f32 Km = {N, NOUT, (float *)k};
   // Do multiplications and inverse
-  mat_inv(&Pyym, &Pyyinvm);           // Inverse of Pyy
+  mat_inv(&Pyymhelp, &Pyyinvm);       // Inverse of Pyy
   mat_mult(&Pxym, &Pyyinvm, &Km);     // K = Pxy inv(Pyy)
 
 
@@ -486,7 +486,6 @@ static void estimatorBoldermanDynMeas(void)
   static arm_matrix_instance_f32 Ktransm = {NOUT, N, (float *)Ktrans};
   static float KPyyK[N][N];
   static arm_matrix_instance_f32 KPyyKm = {N, N, (float *)KPyyK};
-  static arm_matrix_instance_f32 Km = {N, NOUT, (float *)k};
   static arm_matrix_instance_f32 Pyym = {NOUT, NOUT, (float *)Pyy};
 
   // Do multiplations and transpose
