@@ -44,6 +44,18 @@ The model implemented is the following:
 #define UPPERBOUND 10000.0f                  // Upperbound after which inversion is adjusted
 #define UPPERBOUND_TRACE 100.0f
 #define TS (1.0f/100.0f)
+#define UPPERBOUND_DT 0.1f                // Upperbound of th timestep
+
+// QUEUEING for position measurement
+#define TWR_MEASUREMENT_QUEUE_LENGTH (10) // Number of measurements maximally in the queue
+static xQueueHandle twrDataQueueu;
+
+// Prototype of function to add measurement to queue
+bool estimatorBoldermanEnqueueDistance(distanceMeasurement_t *measurement);
+// Prototype of Boolean to receive measurement from queue
+static inline bool estimatorHasTWRMeasurement(distanceMeasurement_t *dist) {
+  return (pdTRUE == xQueueReceive(twrDataQueue, dist, 0));
+}
 
 /*******************************************************************************
 *   Internal variables for the estimator
@@ -64,7 +76,7 @@ static uint32_t gyroAccumulatorCount;       // Count variable, number of samples
 static uint32_t magAccumulatorCount;        // Count variable, number of samples of which angular acceleration measurement is summed
 static uint32_t thrustAccumulatorCount;     // Count variable, number of samples of which thrust is summed
 // Extra variables used in the Unscented Kalman Filter
-static float alpha = 0.01f;                // Defines spread of sigma points
+static float alpha = 0.1f;                // Defines spread of sigma points
 static float kappa = 0.0f;                  // Secondary scaling factor
 static float beta = 2.0f;                   // Distributation parameter, gaussion := 2
 static float lambda;                        // Scaling parameter used for determining: Weights and Sigma points
@@ -86,12 +98,14 @@ static float Pyyinv[NOUT][NOUT];            // Inverse of Pyy
 static float k[N][NOUT];                    // Kalman gain (Pxy * inv(Pyy))
 static uint8_t fly = 0;                    // Boolean stating that the crazyflie flying or not
 static float y[NOUT];                       // Measurement vectors (just to show how to use static variables)
+static uint8_t ycounter = 0;                // Counter, to see how much postionmeasurements are available
+static float anchor[3][NOUT];               // Anchor positions from where distance to drone is measured
 static float omega[3];                      // Gyroscopic measurements
 static float tracePxx;                      // Trace of the covariance matrix Pxx
 // The following arrays help with initializing Pxx, and defining q and r
 static float Pxxdiag[N]  = {1.0f,1.0f,1.0f, 1.0f,1.0f,1.0f, 1.0f,1.0f,1.0f, 1.0f,1.0f,1.0f};
 static float qdiag[N]    = {TS*0.001f,TS*0.001f,TS*0.001f, TS*0.01f,TS*0.01f,TS*0.01f, TS*0.001f,TS*0.001f,TS*0.001f, TS*0.01f,TS*0.01f,TS*0.01f};
-static float rdiag[NOUT] = {0.01f,0.01f,0.01f, 0.001f,0.001f,0.001f};
+static float rdiag[NOUT] = {0.001f,0.001f,0.001f, 0.001f,0.001f,0.001f};
 
 // Functions used for multiplication
 static inline void mat_trans(const arm_matrix_instance_f32 * pSrc, arm_matrix_instance_f32 * pDst)
@@ -109,6 +123,8 @@ static inline float arm_sqrt(float32_t in)
 static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, Axis3f *gyro, Axis3f *mag, float dt, uint32_t osTick);
 // Prototype of function combining prediction and measurement = actual update
 static void estimatorBoldermanDynMeas(void);
+// Prototype of function setting prediction to estimation (when no position measurements available / or not enough)
+static void estimatorBoldermanPredEst(void);
 // Prototype of function saving the updated state
 static void estimatorBoldermanStateSave(state_t *state, uint32_t osTick);
 // Prototype of function defining the dynamics
@@ -190,7 +206,9 @@ void estimatorBolderman(state_t *state, sensorData_t *sensors, control_t *contro
 
     // Computes the time step used
     float dt = (float)(osTick-lastPrediction)/configTICK_RATE_HZ;
-
+    if (dt > UPPERBOUND_DT) {
+      consolePrintf("dt exceeds upperbound \n");
+    }
 
 
     // This is where we perform the time-integration of the state estimate
@@ -213,15 +231,28 @@ void estimatorBolderman(state_t *state, sensorData_t *sensors, control_t *contro
 static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, Axis3f *gyro, Axis3f *mag, float dt, uint32_t osTick)
 {
   // Store the measuremets y1 y2 y3 as rows in a matrix
-  y[0] = 0.0f;    // SHOULD BE CHANGED TO POSITION MEASUREMENT
-  y[1] = 0.0f;
-  y[2] = 0.0f;
   y[3] = acc->x;
   y[4] = acc->y;
   y[5] = acc->z;
   omega[0] = gyro->x;   // ACTUALLY MEASUREMENT, USED AS INPUT!
   omega[1] = gyro->y;
   omega[2] = gyro->z;
+
+  // Get the distance to quadcopter and anchor positions
+  // while loop -> multiple position measurements can be obtained during one timestep
+  // When there are more than three distance measurements, we only take the three most recent
+  distanceMeasurement_t dist;
+  while (estimatorHasTWRMeasurement(&dist))
+  {
+    static uint8_t yindex;
+    yindex = ycounter % 3;
+    y[yindex] = dist.distance;
+    anchor[0][yindex] = dist.x;
+    anchor[1][yindex] = dist.y;
+    anchor[2][yindex] = dist.z;
+    ycounter++;
+    //consolePrintf("Queued measurementÖ %f", (double)distance);
+  }
 
 
   /* The following things are performed here:
@@ -238,8 +269,13 @@ static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, 
   */
   // Use dynamics to predict state at next interval
   estimatorBoldermanPredict(dt, thrust);
-  // Use predicted state and measurement to improve Estimation
-  estimatorBoldermanDynMeas();
+  // The update can only be performed with at least three position measurements
+  if (ycounter >= 3) {
+    // Use predicted state and measurement to improve Estimation
+    estimatorBoldermanDynMeas();
+  } else {
+    estimatorBoldermanPredEst();
+  }
   // Save new estimation in the state
   estimatorBoldermanStateSave(state, osTick);
 }
@@ -336,9 +372,9 @@ static void estimatorBoldermanPredict(float dt, float thrust)
       sigmaXplus[11][ii] = sigmaX[11][ii];  // Yaw is not influenced by ground
     }
     // Now compute the output vector
-    sigmaYplus[0][ii] = sigmaXplus[0][ii];
-    sigmaYplus[1][ii] = sigmaXplus[1][ii];
-    sigmaYplus[2][ii] = sigmaXplus[2][ii];
+    sigmaYplus[0][ii] = sqrtf((sigmaXplus[0][ii]-anchor[0][0])*(sigmaXplus[0][ii]-anchor[0][0]) + (sigmaXplus[1][ii]-anchor[1][0])*(sigmaXplus[1][ii]-anchor[1][0]) + (sigmaXplus[2][ii]-anchor[2][0])*(sigmaXplus[2][ii]-anchor[2][0]));
+    sigmaYplus[1][ii] = sqrtf((sigmaXplus[0][ii]-anchor[0][1])*(sigmaXplus[0][ii]-anchor[0][1]) + (sigmaXplus[1][ii]-anchor[1][1])*(sigmaXplus[1][ii]-anchor[1][1]) + (sigmaXplus[2][ii]-anchor[2][1])*(sigmaXplus[2][ii]-anchor[2][1]));
+    sigmaYplus[2][ii] = sqrtf((sigmaXplus[0][ii]-anchor[0][2])*(sigmaXplus[0][ii]-anchor[0][2]) + (sigmaXplus[1][ii]-anchor[1][2])*(sigmaXplus[1][ii]-anchor[1][2]) + (sigmaXplus[2][ii]-anchor[2][2])*(sigmaXplus[2][ii]-anchor[2][2]));
     sigmaYplus[3][ii] = cosf(sigmaXplus[9][ii])*cosf(sigmaXplus[11][ii])*sigmaXplus[6][ii] + cosf(sigmaXplus[9][ii])*sinf(sigmaXplus[11][ii])*sigmaXplus[7][ii] - sinf(sigmaXplus[10][ii])*(sigmaXplus[8][ii]+GRAVITY_MAGNITUDE);
     sigmaYplus[4][ii] = (cosf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*sinf(sigmaXplus[9][ii])-cosf(sigmaXplus[9][ii])*sinf(sigmaXplus[11][ii]))*sigmaXplus[6][ii] + (sinf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*sinf(sigmaXplus[9][ii])+cosf(sigmaXplus[9][ii])*cosf(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cosf(sigmaXplus[10][ii])*sinf(sigmaXplus[9][ii]))*(sigmaXplus[8][ii]+GRAVITY_MAGNITUDE);
     sigmaYplus[5][ii] = (cosf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*cosf(sigmaXplus[9][ii])+sinf(sigmaXplus[9][ii])*sinf(sigmaXplus[11][ii]))*sigmaXplus[6][ii] + (sinf(sigmaXplus[11][ii])*sinf(sigmaXplus[10][ii])*cosf(sigmaXplus[9][ii])-sinf(sigmaXplus[9][ii])*cosf(sigmaXplus[11][ii]))*sigmaXplus[7][ii] + (cosf(sigmaXplus[10][ii])*cosf(sigmaXplus[9][ii]))*(sigmaXplus[8][ii]+GRAVITY_MAGNITUDE);
@@ -393,6 +429,14 @@ static void estimatorBoldermanPredict(float dt, float thrust)
         Pxx[ii][jj] += wc[kk] * (sigmaXplus[ii][kk] - xpred[ii]) * (sigmaXplus[jj][kk] - xpred[jj]);
       }
     }
+  }
+}
+
+// Perform the update rule, using the prediction and measurement
+static void estimatorBoldermanDynMeas(void)
+{
+  // Calculate Pxy, Pyy and K. Performed here, because only necessary when position measurements are available
+  for (int ii = 0; ii<N; ii++) {
     for (int jj = 0; jj<NOUT; jj++) {   // Pxy
       Pxy[ii][jj] = 0.0f;
       for (int kk = 0; kk<NSIGMA; kk++) {
@@ -424,11 +468,8 @@ static void estimatorBoldermanPredict(float dt, float thrust)
   // Do multiplications and inverse
   mat_inv(&Pyym, &Pyyinvm);           // Inverse of Pyy
   mat_mult(&Pxym, &Pyyinvm, &Km);     // K = Pxy inv(Pyy)
-}
 
-// Perform the update rule, using the prediction and measurement
-static void estimatorBoldermanDynMeas(void)
-{
+
   // UKF UPDATE OF THE STATE
   for (int ii=0; ii<N; ii++) {    // Difference with/without posiotion measurement not needed (K depends on measurement)
     x[ii] = xpred[ii];
@@ -469,6 +510,13 @@ static void estimatorBoldermanDynMeas(void)
     for (int ii=0; ii<N; ii++) {
       tracePxx += Pxx[ii][ii];
     }
+  }
+}
+// Function used to set prediction to estimation, when no measurements available
+static void estimatorBoldermanPredEst(void) {
+  for (int ii=0; ii<N; ii++) {
+    // Set predicted value to estimated, because no update can be performed, due too the lack of measuremets
+    x[ii] = xpred[ii];
   }
 }
 
@@ -541,6 +589,10 @@ void estimatorBoldermanInit(void) {
   // Initializing is actually getting the first prediction, defined here
   lastPrediction = xTaskGetTickCount();
 
+  // Define the measurement Queue
+  twrDataQueue = xQueueCreate(TWR_MEASUREMENT_QUEUE_LENGTH, sizeof(distanceMeasurement_t));
+
+
   // Reset accumulators and counters
   // Often theseinverse 3x3 matrix are readily zero, but when starting over, these values need to be resetted
   accAccumulator = (Axis3f){.axis={0}};
@@ -571,7 +623,7 @@ void estimatorBoldermanInit(void) {
   x = {0,0,0, 0,0,0, 0,0,0, 0,0,0};
   */
 
-  // COVARIANCES
+  // COVARIANCES and INITIAL STATE
   // Estimation covariance
   for (int ii=0; ii<N; ii++) {
     x[ii] = 0.0f;
@@ -665,6 +717,13 @@ int cholesky_decomposition(float (*A)[N], float (*R)[N], int n)
     }
   }
   return 1;
+}
+
+// Function called from outside to add measurement to Queue
+bool estimatorBoldermanEnqueueDistance(distanceMeasurement_t *measurement)
+{
+  ASSERT(isInit);
+  return xQueueSend(twrDataQueue, measurement, 0);
 }
 
 // State all wanted outputs, which can be plotted on the crazyflie client
