@@ -45,7 +45,7 @@ The model implemented is the following:
 #define TS (1.0f/100.0f)
 #define UPPERBOUND_DT 0.1f                // Upperbound of the timestep
 
-// QUEUEING for position measurement 
+// QUEUEING for position measurement
 #define TWR_MEASUREMENT_QUEUE_LENGTH (10)
 static xQueueHandle twrDataQueue;
 
@@ -401,6 +401,15 @@ static void estimatorBoldermanPredict(float dt, float thrust)
         Pxx[ii][jj] += wc[kk] * (sigmaXplus[ii][kk] - xpred[ii]) * (sigmaXplus[jj][kk] - xpred[jj]);
       }
     }
+  }
+
+}
+
+// Perform the update rule, using the prediction and measurement
+static void estimatorBoldermanDynMeas(void)
+{
+  // Calculate Pxy, Pyy and K. Performed here, because only necessary when position measurements are available
+  for (int ii = 0; ii<N; ii++) {
     for (int jj = 0; jj<NOUT; jj++) {   // Pxy
       Pxy[ii][jj] = 0.0f;
       for (int kk = 0; kk<NSIGMA; kk++) {
@@ -432,11 +441,8 @@ static void estimatorBoldermanPredict(float dt, float thrust)
   // Do multiplications and inverse
   mat_inv(&Pyym, &Pyyinvm);           // Inverse of Pyy
   mat_mult(&Pxym, &Pyyinvm, &Km);     // K = Pxy inv(Pyy)
-}
 
-// Perform the update rule, using the prediction and measurement
-static void estimatorBoldermanDynMeas(void)
-{
+
   // UKF UPDATE OF THE STATE
   for (int ii=0; ii<N; ii++) {
     x[ii] = xpred[ii];
