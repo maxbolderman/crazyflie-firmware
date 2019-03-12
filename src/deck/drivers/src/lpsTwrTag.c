@@ -262,7 +262,7 @@ static uint32_t rxcallback(dwDevice_t *dev) {
         dist.z = options->anchorPosition[current_anchor].z;
         dist.stdDev = 0.25;
         estimatorKalmanEnqueueDistance(&dist);
-	estimatorBoldermanEnqueueDistance(&dist);
+	      estimatorBoldermanEnqueueDistance(&dist);
       }
 
       if (options->useTdma && current_anchor == 0) {
