@@ -549,7 +549,7 @@ static void resetPxx(void) {
   for (int ii=0; ii<N; ii++) {
     for (int jj=0; jj<N; jj++) {
       if (ii == jj) {
-        Pxx[ii][jj] = Pxxdiag[ii];
+        Pxx[ii][jj] = Pxxdiag[ii]*Pxxdiag[ii];
       } else {
         Pxx[ii][jj] = 0.0f;
       }
