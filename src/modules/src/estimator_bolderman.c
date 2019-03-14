@@ -103,9 +103,9 @@ static float anchor[3][NOUT];               // Anchor positions from where dista
 static float omega[3];                      // Gyroscopic measurements
 static float tracePxx;                      // Trace of the covariance matrix Pxx
 // The following arrays help with initializing Pxx, and defining q and r
-static float Pxxdiag[N]  = {1.0f,1.0f,1.0f, 1.0f,1.0f,1.0f, 1.0f,1.0f,1.0f, 1.0f,1.0f,1.0f};
-static float qdiag[N]    = {TS*0.001f,TS*0.001f,TS*0.001f, TS*0.01f,TS*0.01f,TS*0.01f, TS*0.001f,TS*0.001f,TS*0.001f, TS*0.01f,TS*0.01f,TS*0.01f};
-static float rdiag[NOUT] = {0.001f,0.001f,0.001f, 0.001f,0.001f,0.001f};
+static float Pxxdiag[N]  = {10.0f,10.0f,1.0f, 0.01f,0.01f,0.01f, 0.001f,0.001f,0.001f, 0.01f,0.01f,0.01f};
+static float qdiag[N]    = {0.25f*TS*TS,0.25f*TS*TS,0.25f*TS*TS, 0.5f*TS,0.5f*TS,0.5f*TS, 0.5f,0.5f,0.5f, 0.1f*TS,0.1f*TS,0.1f*TS};
+static float rdiag[NOUT] = {0.25f,0.25f,0.25f, 0.1f,0.1f,0.1f};
 
 // Functions used for multiplication
 static inline void mat_trans(const arm_matrix_instance_f32 * pSrc, arm_matrix_instance_f32 * pDst)
@@ -572,7 +572,7 @@ static void resetPxx(void) {
   for (int ii=0; ii<N; ii++) {
     for (int jj=0; jj<N; jj++) {
       if (ii == jj) {
-        Pxx[ii][jj] = Pxxdiag[ii];
+        Pxx[ii][jj] = Pxxdiag[ii]*Pxxdiag[ii];
       } else {
         Pxx[ii][jj] = 0.0f;
       }
@@ -628,7 +628,7 @@ void estimatorBoldermanInit(void) {
     x[ii] = 0.0f;
     for (int jj=0; jj<N; jj++) {
       if (ii == jj) {
-        Pxx[ii][jj] = Pxxdiag[ii];
+        Pxx[ii][jj] = Pxxdiag[ii]*Pxxdiag[ii];
       } else {
         Pxx[ii][jj] = 0.0f;
       }
@@ -638,7 +638,7 @@ void estimatorBoldermanInit(void) {
   for (int ii=0; ii<N; ii++) {
     for (int jj=0; jj<N; jj++) {
       if (ii == jj) {
-        q[ii][jj] = qdiag[ii];
+        q[ii][jj] = qdiag[ii]*qdiag[ii];
       } else {
         q[ii][jj] = 0.0f;
       }
@@ -648,7 +648,7 @@ void estimatorBoldermanInit(void) {
   for (int ii=0; ii<NOUT; ii++) {
     for (int jj=0; jj<NOUT; jj++) {
       if (ii == jj) {
-        r[ii][jj] = rdiag[ii];
+        r[ii][jj] = rdiag[ii]*rdiag[ii];
       } else {
         r[ii][jj] = 0.0f;
       }
