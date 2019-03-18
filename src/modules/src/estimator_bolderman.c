@@ -728,10 +728,7 @@ LOG_GROUP_STOP(BOLDERMAN_est)
 
 // Measurement group
 LOG_GROUP_START(BOLDERMAN_meas)
-  LOG_ADD(LOG_FLOAT, acc_x_meas, &acceleration[0])
-  LOG_ADD(LOG_FLOAT, acc_y_meas, &acceleration[1])
-  LOG_ADD(LOG_FLOAT, acc_z_meas, &acceleration[2])
-  LOG_ADD(LOG_FLOAT, gyr_x_meas, &omega[0])
-  LOG_ADD(LOG_FLOAT, gyr_y_meas, &omega[1])
-  LOG_ADD(LOG_FLOAT, gyr_z_meas, &omega[2])
+  LOG_ADD(LOG_FLOAT, dist1, &y[0])
+  LOG_ADD(LOG_FLOAT, dist2, &y[1])
+  LOG_ADD(LOG_FLOAT, dist3, &y[2])
 LOG_GROUP_STOP(BOLDERMAN_meas)
