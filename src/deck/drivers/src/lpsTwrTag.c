@@ -45,6 +45,10 @@
 #include "configblock.h"
 #include "lpsTdma.h"
 
+// INCLUDE estimator BOLDERMAN
+#include "estimator_bolderman.h"
+
+
 #define ANTENNA_OFFSET 154.6   // In meter
 
 // Config
@@ -259,6 +263,7 @@ static uint32_t rxcallback(dwDevice_t *dev) {
         dist.z = options->anchorPosition[current_anchor].z;
         dist.stdDev = 0.25;
         estimatorKalmanEnqueueDistance(&dist);
+        estimatorBoldermanEnqueueDistance(&dist);
       }
 
       if (options->useTdma && current_anchor == 0) {
