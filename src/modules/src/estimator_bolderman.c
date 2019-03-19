@@ -30,7 +30,7 @@ The model implemented is the following:
 #define DEG_TO_RAD (PI/180.0f)            // Degrees to radians
 #define RAD_TO_DEG (180.0f/PI)            // Radians to degrees
 #define GRAVITY_MAGNITUDE (9.81f)         // Gravitational constant
-#define PREDICT_RATE RATE_100_HZ          // Frequency of which this filter is applied
+#define PREDICT_RATE 100          // Frequency of which this filter is applied
 #define CRAZYFLIE_WEIGHT_grams (27.0f)    // Weight of crazyflie
 #define CONTROL_TO_ACC (GRAVITY_MAGNITUDE*60.0f/CRAZYFLIE_WEIGHT_grams/65536.0f)
                 // variable defining the factor from control input to acceleration

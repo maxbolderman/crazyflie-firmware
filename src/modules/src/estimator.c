@@ -7,6 +7,7 @@
 #include "estimator_kalman.h"
 #include "estimator_bolderman.h"
 
+//#define DEFAULT_ESTIMATOR boldermanEstimator
 #define DEFAULT_ESTIMATOR boldermanEstimator
 static StateEstimatorType currentEstimator = anyEstimator;
 

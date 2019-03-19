@@ -476,14 +476,14 @@ static bool dwm1000Test()
 
   return isInit;
 }
-
+//.requiredEstimator = kalmanEstimator,
 static const DeckDriver dwm1000_deck = {
   .vid = 0xBC,
   .pid = 0x06,
   .name = "bcDWM1000",
 
   .usedGpio = 0,  // FIXME: set the used pins
-  .requiredEstimator = kalmanEstimator,
+  .requiredEstimator = boldermanEstimator,
   #ifdef LOCODECK_NO_LOW_INTERFERENCE
   .requiredLowInterferenceRadioMode = false,
   #else
