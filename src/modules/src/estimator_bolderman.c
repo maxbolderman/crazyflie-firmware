@@ -30,7 +30,7 @@ The model implemented is the following:
 #define DEG_TO_RAD (PI/180.0f)            // Degrees to radians
 #define RAD_TO_DEG (180.0f/PI)            // Radians to degrees
 #define GRAVITY_MAGNITUDE (9.81f)         // Gravitational constant
-#define PREDICT_RATE 100          // Frequency of which this filter is applied
+#define PREDICT_RATE 1          // Frequency of which this filter is applied
 #define CRAZYFLIE_WEIGHT_grams (27.0f)    // Weight of crazyflie
 #define CONTROL_TO_ACC (GRAVITY_MAGNITUDE*60.0f/CRAZYFLIE_WEIGHT_grams/65536.0f)
                 // variable defining the factor from control input to acceleration
@@ -40,9 +40,9 @@ The model implemented is the following:
 #define NCALC 9.0f                       // Dimension as a float
 // Output = [ax, ay, az] --> acceleration in body coordinates
 // Output = [x, y, z, ax, ay, az] --> position in global coordinates and acceleration in body coordinates
-#define UPPERBOUND 10000.0f                  // Upperbound after which inversion is adjusted
-#define UPPERBOUND_TRACE 1000.0f
-#define TS (1.0f/100.0f)
+#define UPPERBOUND 100.0f                  // Upperbound after which inversion is adjusted
+#define UPPERBOUND_TRACE 100.0f
+#define TS (1.0f/1.0f)
 #define UPPERBOUND_DT 0.1f                // Upperbound of the timestep
 
 // QUEUEING for position measurement
@@ -84,7 +84,7 @@ static float wc[NSIGMA];                    // Weights for calculating the covar
 static float q[N][N];                       // Covariance of process noise (zero-mean Gaussian distributed)
 static float r[NOUT][NOUT];                 // Covariance of measurement noise (zero-mean Gaussian distributed)
 // State momentary (x, y, z, xdot, ydot, zdot, xddot, yddot, zddot, pitch, yaw, roll)
-static float x[N];                          // State column, containing values of the states
+static float x[N] = {1.0f,4.0f,0.5f, 0.0f,0.0f,0.0f, 0.0f,0.0f,0.0f};                          // State column, containing values of the states
 static float sigmaX[N][NSIGMA];             // Matrix containing all sigmapoints
 static float sigmaXplus[N][NSIGMA];         // Matrix containing updated sigmapoints
 static float sigmaYplus[NOUT][NSIGMA];      // Matrix containing output of sigma points
@@ -102,9 +102,19 @@ static float omega[3];                      // Gyroscopic measurements
 static float acceleration[3];               // Acceleration measurements
 static float tracePxx;                      // Trace of the covariance matrix Pxx
 // The following arrays help with initializing Pxx, and defining q and r
-static float Pxxdiag[N]  = {10.0f,10.0f,1.0f, 0.01f,0.01f,0.01f, 0.01f,0.01f,0.01f};
+static float Pxxdiag[N]  = {1.0f,1.0f,1.0f, 0.01f,0.01f,0.01f, 0.01f,0.01f,0.01f};
 static float qdiag[N]    = {0.25f*TS*TS,0.25f*TS*TS,0.25f*TS*TS, 0.5f*TS,0.5f*TS,0.5f*TS, 0.1f*TS,0.1f*TS,0.1f*TS};
 static float rdiag[NOUT] = {0.25f,0.25f,0.25f};
+// Variables used for debugging
+static float maxX = 0.0f;
+static float maxY = 0.0f;
+static float maxPxx = 0.0f;
+static float maxPyy = 0.0f;
+static float maxPyyinv = 0.0f;
+static float maxPxy = 0.0f;
+static float maxK = 0.0f;
+static float maxDelta = 0.0f;
+static float maxAnchor = 0.0f;
 
 // Functions used for multiplication
 static inline void mat_trans(const arm_matrix_instance_f32 * pSrc, arm_matrix_instance_f32 * pDst)
@@ -130,6 +140,8 @@ static void estimatorBoldermanStateSave(state_t *state, uint32_t osTick);
 static void estimatorBoldermanPredict(float dt, float thrust);
 // Prototype of function for resetting Pxx (when cholesky cannot be computed)
 static void resetPxx(void);
+// Calculate maximum value of EVERYTHING USED, to see why it is
+static void calcMaximumEverything(void);
 
 // Prototypes of function By Marcus Greiff (cholesky decomposition)
 int  assert_element(float val);
@@ -212,6 +224,7 @@ void estimatorBolderman(state_t *state, sensorData_t *sensors, control_t *contro
 
     // This is where we perform the time-integration of the state estimate
     estimatorBoldermanUpdate(state, thrustAccumulator, &accAccumulator, &gyroAccumulator, &magAccumulator, dt, osTick);
+    calcMaximumEverything();
 
     // Reset the accumulators and counters to be used next sample
     lastPrediction = osTick;                  // Last moment in time we made a prediction == now
@@ -269,9 +282,11 @@ static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, 
   // The update can only be performed when at least three position measurements are performed
   if (ycounter >= 3) {
     // Use predicted state and measurement to improve Estimation
+    //consolePrintf("Use measurement, %f", (double)ycounter);
+    //consolePrintf("\n");
     estimatorBoldermanDynMeas();
     ycounter = 0;
-    // Anchor does not need to be resetted, will be overwritten
+    // Anchor and distance do not need to be resetted, will be overwritten
   } else {
     // Set predicted value to estimated (otherwise other measurements will be forgotten)
     estimatorBoldermanPredEst();
@@ -292,6 +307,21 @@ static void estimatorBoldermanPredict(float dt, float thrust)
     // Then no good solution delta is found, so reinitialize Pxx
     resetPxx();
     status = cholesky_decomposition(Pxx,delta,N);
+  }
+  // Maximum of delta
+  if (delta[0][0]>0.0f) {
+    maxDelta = delta[0][0];
+  } else {
+    maxDelta = -delta[0][0];
+  }
+  for (int ii=0; ii<N; ii++) {
+    for (int jj=0; jj<N; jj++) {
+      if (delta[ii][jj] > maxDelta) {
+        maxDelta = delta[ii][jj];
+      } else if (-delta[ii][jj] > maxDelta) {
+        maxDelta = -delta[ii][jj];
+      }
+    }
   }
   // Define the sigma points
   for (int ii = 0; ii<NSIGMA; ii++) {
@@ -357,28 +387,6 @@ static void estimatorBoldermanPredict(float dt, float thrust)
     xpred[ii] = 0.0f;
     for (int jj=0; jj<NSIGMA; jj++) {
       xpred[ii] += wm[jj]*sigmaXplus[ii][jj];
-    }
-  }
-  // Exerting the bounds
-  while ((xpred[6] > PI) || (xpred[6] < -PI)) {
-    if (xpred[6] > PI) {
-      xpred[6] -= 2*PI;
-    } else if (xpred[6] < -PI) {
-      xpred[6] += 2*PI;
-    }
-  }
-  while ((xpred[7] > PI) || (xpred[7] < -PI)) {
-    if (xpred[7] > PI) {
-      xpred[7] -= 2*PI;
-    } else if (xpred[7] < -PI) {
-      xpred[7] += 2*PI;
-    }
-  }
-  while ((xpred[8] > PI) || (xpred[8] < -PI)) {
-    if (xpred[8] > PI) {
-      xpred[8] -= 2*PI;
-    } else if (xpred[8] < -PI) {
-      xpred[8] += 2*PI;
     }
   }
   for (int ii=0; ii<NOUT; ii++) {   // Predicted output
@@ -448,6 +456,28 @@ static void estimatorBoldermanDynMeas(void)
     x[ii] = xpred[ii];
     for (int jj=0; jj<NOUT; jj++) {
       x[ii] += k[ii][jj] * (y[jj]-ypred[jj]);
+    }
+  }
+  // Exerting the bounds
+  while ((x[6] > PI) || (x[6] < -PI)) {
+    if (x[6] > PI) {
+      x[6] -= 2*PI;
+    } else if (x[6] < -PI) {
+      x[6] += 2*PI;
+    }
+  }
+  while ((x[7] > PI) || (x[7] < -PI)) {
+    if (x[7] > PI) {
+      x[7] -= 2*PI;
+    } else if (x[7] < -PI) {
+      x[7] += 2*PI;
+    }
+  }
+  while ((x[8] > PI) || (x[8] < -PI)) {
+    if (x[8] > PI) {
+      x[8] -= 2*PI;
+    } else if (x[8] < -PI) {
+      x[8] += 2*PI;
     }
   }
 
@@ -599,10 +629,9 @@ void estimatorBoldermanInit(void) {
   x = {0,0,0, 0,0,0, 0,0,0, 0,0,0};
   */
 
-  // COVARIANCES and INITIAL STATE
+  // COVARIANCES
   // Estimation covariance
   for (int ii=0; ii<N; ii++) {
-    x[ii] = 0.0f;
     for (int jj=0; jj<N; jj++) {
       if (ii == jj) {
         Pxx[ii][jj] = Pxxdiag[ii]*Pxxdiag[ii];
@@ -708,6 +737,125 @@ bool estimatorBoldermanEnqueueDistance(distanceMeasurement_t *measurement)
   return xQueueSend(twrDataQueue, measurement, 0);
 }
 
+static void calcMaximumEverything(void) {
+  // Maximum of x
+  if (x[0]>0.0f) {
+    maxX = x[0];
+  } else {
+    maxX = -x[0];
+  }
+  for (int ii=1; ii<N; ii++) {
+    if (x[ii] > maxX) {
+      maxX = x[ii];
+    } else if (-x[ii] > maxX) {
+      maxX = -x[ii];
+    }
+  }
+  // Maximum of y
+  if (y[0]>0.0f) {
+    maxY = y[0];
+  } else {
+    maxY = -y[0];
+  }
+  for (int ii=1; ii<NOUT; ii++) {
+    if (y[ii] > maxY) {
+      maxY = y[ii];
+    } else if (-y[ii] > maxY) {
+      maxY = -y[ii];
+    }
+  }
+  // Maximum of Pxx
+  if (Pxx[0][0]>0.0f) {
+    maxPxx = Pxx[0][0];
+  } else {
+    maxPxx = -Pxx[0][0];
+  }
+  for (int ii=0; ii<N; ii++) {
+    for (int jj=0; jj<N; jj++) {
+      if (Pxx[ii][jj] > maxPxx) {
+        maxPxx = Pxx[ii][jj];
+      } else if (-Pxx[ii][jj] > maxPxx) {
+        maxPxx = -Pxx[ii][jj];
+      }
+    }
+  }
+  // Maximum of Pyy
+  if (Pyy[0][0]>0.0f) {
+    maxPyy = Pyy[0][0];
+  } else {
+    maxPyy = -Pyy[0][0];
+  }
+  for (int ii=0; ii<NOUT; ii++) {
+    for (int jj=0; jj<NOUT; jj++) {
+      if (Pyy[ii][jj] > maxPyy) {
+        maxPyy = Pyy[ii][jj];
+      } else if (-Pyy[ii][jj] > maxPyy) {
+        maxPyy = -Pyy[ii][jj];
+      }
+    }
+  }
+  // Maximum of Pxy
+  if (Pxy[0][0]>0.0f) {
+    maxPxy = Pxy[0][0];
+  } else {
+    maxPxy = -Pxy[0][0];
+  }
+  for (int ii=0; ii<N; ii++) {
+    for (int jj=0; jj<NOUT; jj++) {
+      if (Pxy[ii][jj] > maxPxy) {
+        maxPxy = Pxy[ii][jj];
+      } else if (-Pxy[ii][jj] > maxPxy) {
+        maxPxy = -Pxy[ii][jj];
+      }
+    }
+  }
+  // Maximum of Pyyinv
+  if (Pyyinv[0][0]>0.0f) {
+    maxPyyinv = Pyyinv[0][0];
+  } else {
+    maxPyyinv = -Pyyinv[0][0];
+  }
+  for (int ii=0; ii<NOUT; ii++) {
+    for (int jj=0; jj<NOUT; jj++) {
+      if (Pyyinv[ii][jj] > maxPyyinv) {
+        maxPyyinv = Pyyinv[ii][jj];
+      } else if (-Pyyinv[ii][jj] > maxPyyinv) {
+        maxPyyinv = -Pyyinv[ii][jj];
+      }
+    }
+  }
+  // Maximum of K
+  if (k[0][0]>0.0f) {
+    maxK = k[0][0];
+  } else {
+    maxK = -k[0][0];
+  }
+  for (int ii=0; ii<N; ii++) {
+    for (int jj=0; jj<NOUT; jj++) {
+      if (k[ii][jj] > maxK) {
+        maxK = k[ii][jj];
+      } else if (-k[ii][jj] > maxK) {
+        maxK = -k[ii][jj];
+      }
+    }
+  }
+  // Maximum of anchor
+  if (anchor[0][0] > 0.0f) {
+    maxAnchor = anchor[0][0];
+  } else {
+    maxAnchor = -anchor[0][0];
+  }
+  for (int ii=0; ii<3; ii++) {
+    for (int jj=0; jj<3; jj++) {
+      if (anchor[ii][jj] > maxAnchor) {
+        maxAnchor = anchor[ii][jj];
+      } else if (-anchor[ii][jj] > maxAnchor) {
+        maxAnchor = -anchor[ii][jj];
+      }
+    }
+  }
+}
+
 // State all wanted outputs, which can be plotted on the crazyflie client
 // Estimation group
 LOG_GROUP_START(BOLDERMAN_est)
@@ -718,12 +866,9 @@ LOG_GROUP_START(BOLDERMAN_est)
   LOG_ADD(LOG_FLOAT, vel_x_est,  &x[3])
   LOG_ADD(LOG_FLOAT, vel_y_est,  &x[4])
   LOG_ADD(LOG_FLOAT, vel_z_est,  &x[5])
-  LOG_ADD(LOG_FLOAT, acc_x_est,  &x[6])
-  LOG_ADD(LOG_FLOAT, acc_y_est,  &x[7])
-  LOG_ADD(LOG_FLOAT, acc_z_est,  &x[8])
-  LOG_ADD(LOG_FLOAT, roll_est,   &x[9])
-  LOG_ADD(LOG_FLOAT, pitch_est,  &x[10])
-  LOG_ADD(LOG_FLOAT, yaw_est,    &x[11])
+  LOG_ADD(LOG_FLOAT, roll,  &x[6])
+  LOG_ADD(LOG_FLOAT, pitch,  &x[7])
+  LOG_ADD(LOG_FLOAT, yaw,  &x[8])
 LOG_GROUP_STOP(BOLDERMAN_est)
 
 // Measurement group
@@ -732,3 +877,16 @@ LOG_GROUP_START(BOLDERMAN_meas)
   LOG_ADD(LOG_FLOAT, dist2, &y[1])
   LOG_ADD(LOG_FLOAT, dist3, &y[2])
 LOG_GROUP_STOP(BOLDERMAN_meas)
+
+// MAXIMUM VALUES FOR DEBUGGING
+LOG_GROUP_START(BOLDERMAN_max)
+  LOG_ADD(LOG_FLOAT, maxx, &maxX)
+  LOG_ADD(LOG_FLOAT, maxy, &maxY)
+  LOG_ADD(LOG_FLOAT, maxk, &maxK)
+  LOG_ADD(LOG_FLOAT, maxpxx, &maxPxx)
+  LOG_ADD(LOG_FLOAT, maxpyy, &maxPyy)
+  LOG_ADD(LOG_FLOAT, maxpxy, &maxPxy)
+  LOG_ADD(LOG_FLOAT, maxdelta, &maxDelta)
+  LOG_ADD(LOG_FLOAT, maxpyyinv, &maxPyyinv)
+  LOG_ADD(LOG_FLOAT, maxanchor, &maxAnchor)
+LOG_GROUP_STOP(BOLDERMAN_max)
