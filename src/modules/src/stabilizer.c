@@ -46,7 +46,6 @@
 #include "controller.h"
 #include "power_distribution.h"
 
-#include "estimator_kalman.h"
 #include "estimator.h"
 
 static bool isInit;
@@ -89,7 +88,6 @@ void stabilizerInit(StateEstimatorType estimator)
     return;
 
   sensorsInit();
-
   stateEstimatorInit(estimator);
   controllerInit(ControllerTypeAny);
   powerDistributionInit();
@@ -176,9 +174,8 @@ static void stabilizerTask(void* param)
         controllerType = getControllerType();
       }
 
-      getExtPosition(&state);
       stateEstimator(&state, &sensorData, &control, tick);
-
+      
       commanderGetSetpoint(&setpoint, &state);
 
       sitAwUpdateSetpoint(&setpoint, &sensorData, &state);
@@ -495,3 +492,4 @@ LOG_GROUP_STOP(stateEstimate)
 LOG_GROUP_START(latency)
 LOG_ADD(LOG_UINT32, intToOut, &inToOutLatency)
 LOG_GROUP_STOP(latency)
+

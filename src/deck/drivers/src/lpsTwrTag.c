@@ -38,16 +38,12 @@
 #include "crtp_localization_service.h"
 
 #include "stabilizer_types.h"
-#include "estimator_kalman.h"
+#include "estimator.h"
 #include "cf_math.h"
 
 #include "physicalConstants.h"
 #include "configblock.h"
 #include "lpsTdma.h"
-
-// INCLUDE estimator BOLDERMAN
-#include "estimator_bolderman.h"
-
 
 #define ANTENNA_OFFSET 154.6   // In meter
 
@@ -256,15 +252,13 @@ static uint32_t rxcallback(dwDevice_t *dev) {
 
       if ((options->combinedAnchorPositionOk || options->anchorPosition[current_anchor].timestamp) &&
           (diff < (OUTLIER_TH*stddev))) {
-
         distanceMeasurement_t dist;
         dist.distance = state.distance[current_anchor];
         dist.x = options->anchorPosition[current_anchor].x;
         dist.y = options->anchorPosition[current_anchor].y;
         dist.z = options->anchorPosition[current_anchor].z;
         dist.stdDev = 0.25;
-        //estimatorKalmanEnqueueDistance(&dist);
-        estimatorBoldermanEnqueueDistance(&dist);
+        estimatorEnqueueDistance(&dist);
       }
 
       if (options->useTdma && current_anchor == 0) {

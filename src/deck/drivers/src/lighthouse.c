@@ -42,13 +42,53 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
+#define DEBUG_MODULE "LH"
 #include "debug.h"
 #include "uart1.h"
+#include "lh_bootloader.h"
 
 #include "pulse_processor.h"
 #include "lighthouse_geometry.h"
 
-#include "estimator_kalman.h"
+#include "estimator.h"
+
+#ifndef DISABLE_LIGHTHOUSE_DRIVER
+  #define DISABLE_LIGHTHOUSE_DRIVER 1
+#endif
+
+baseStationGeometry_t baseStationsGeometry[] = {
+{.origin = {-1.866722, 2.229666, 1.521226, }, .mat = {{0.710527, 0.378001, -0.593521, }, {0.027454, 0.827931, 0.560158, }, {0.703134, -0.414302, 0.577889, }, }},
+{.origin = {2.158244, 2.287099, -1.858179, }, .mat = {{-0.645509, -0.380170, 0.662412, }, {0.017664, 0.859648, 0.510581, }, {-0.763548, 0.341286, -0.548195, }, }},
+};
+
+#if DISABLE_LIGHTHOUSE_DRIVER == 0
+
+#define STR2(x) #x
+#define STR(x) STR2(x)
+
+#define INCBIN(name, file) \
+    __asm__(".section .rodata\n" \
+            ".global incbin_" STR(name) "_start\n" \
+            ".align 4\n" \
+            "incbin_" STR(name) "_start:\n" \
+            ".incbin \"" file "\"\n" \
+            \
+            ".global incbin_" STR(name) "_end\n" \
+            ".align 1\n" \
+            "incbin_" STR(name) "_end:\n" \
+            ".byte 0\n" \
+            ".align 4\n" \
+            STR(name) "Size:\n" \
+            ".int incbin_" STR(name) "_end - incbin_" STR(name) "_start\n" \
+    ); \
+    extern const __attribute__((aligned(4))) void* incbin_ ## name ## _start; \
+    extern const void* incbin_ ## name ## _end; \
+    extern const int name ## Size; \
+    static const __attribute__((used)) unsigned char* name = (unsigned char*) & incbin_ ## name ## _start; \
+
+INCBIN(bitstream, "lighthouse.bin");
+
+static void checkVersionAndBoot();
 
 static bool isInit = false;
 
@@ -108,12 +148,6 @@ static void calculateStats(uint32_t nowMs) {
   resetStats();
 }
 
-
-baseStationGeometry_t baseStationsGeometry[] = {
-  {.origin = {-1.642549, 2.367428, -1.647901, }, .mat = {{-0.778188, 0.261763, -0.570880, }, {0.068261, 0.938867, 0.337445, }, {0.624311, 0.223627, -0.748483, }, }},
-  {.origin = {1.156152, 2.559995, 1.866168, }, .mat = {{0.871025, -0.170744, 0.460609, }, {-0.088093, 0.868159, 0.488406, }, {-0.483274, -0.465991, 0.741147, }, }},
-};
-  
 static vec3d position;
 static positionMeasurement_t ext_pos;
 static void estimatePosition(pulseProcessorResult_t angles[]) {
@@ -126,8 +160,8 @@ static void estimatePosition(pulseProcessorResult_t angles[]) {
       if (angles[sensor].validCount == 4) {
         lighthouseGeometryGetPosition(baseStationsGeometry, (void*)angles[sensor].angles, position, &delta);
 
-        ext_pos.x += position[0];
-        ext_pos.y -= position[2];
+        ext_pos.x -= position[2];
+        ext_pos.y -= position[0];
         ext_pos.z += position[1];
         sensorsUsed++;
 
@@ -144,7 +178,7 @@ static void estimatePosition(pulseProcessorResult_t angles[]) {
     return;
   }
   ext_pos.stdDev = 0.01;
-  estimatorKalmanEnqueuePosition(&ext_pos);
+  estimatorEnqueuePosition(&ext_pos);
 }
 
 static void lighthouseTask(void *param)
@@ -160,6 +194,9 @@ static void lighthouseTask(void *param)
 
   systemWaitStart();
 
+  // Boot the deck firmware
+  checkVersionAndBoot();
+
   while(1) {
     // Synchronize
     syncCounter = 0;
@@ -174,7 +211,7 @@ static void lighthouseTask(void *param)
       synchronized = syncCounter == 7;
     }
 
-    DEBUG_PRINT("LH: Synchronized!\n");
+    DEBUG_PRINT("Synchronized!\n");
 
     // Receive data until being desynchronized
     synchronized = getFrame(&frame);
@@ -215,12 +252,63 @@ static void lighthouseTask(void *param)
   }
 }
 
+static void checkVersionAndBoot()
+{
+
+  uint8_t bootloaderVersion = 0;
+  lhblGetVersion(&bootloaderVersion);
+  DEBUG_PRINT("Lighthouse bootloader version: %d\n", bootloaderVersion);
+
+  // Wakeup mem
+  lhblFlashWakeup();
+  vTaskDelay(M2T(1));
+
+  // Checking if first and last 64 bytes of bitstream are identical
+  // Also decoding bitstream version for console
+  static char deckBitstream[65];
+  lhblFlashRead(LH_FW_ADDR, 64, (uint8_t*)deckBitstream);
+  deckBitstream[64] = 0;
+  int deckVersion = strtol(&deckBitstream[2], NULL, 10);
+  int embeddedVersion = strtol((char*)&bitstream[2], NULL, 10);
+
+  bool identical = true;
+  if (memcmp(deckBitstream, bitstream, 64)) {
+    DEBUG_PRINT("Fail comparing begining\n");
+    identical = false;
+  }
+
+  lhblFlashRead(LH_FW_ADDR + (bitstreamSize - 64), 64, (uint8_t*)deckBitstream);
+  if (memcmp(deckBitstream, &bitstream[(bitstreamSize - 64)], 64)) {
+    DEBUG_PRINT("Fail comparing end\n");
+    identical = false;
+  }
+
+  if (identical == false) {
+    DEBUG_PRINT("Deck has version %d and we embeed version %d\n", deckVersion, embeddedVersion);
+    DEBUG_PRINT("Updating deck with embedded version!\n");
+
+    // Erase LH deck FW
+    lhblFlashEraseFirmware();
+
+    // Flash LH deck FW
+    if (lhblFlashWriteFW((uint8_t*)bitstream, bitstreamSize)) {
+      DEBUG_PRINT("FW updated [OK]\n");
+    } else {
+      DEBUG_PRINT("FW updated [FAILED]\n");
+    }
+  }
+
+  // Launch LH deck FW
+  DEBUG_PRINT("Firmware version %d verified, booting deck!\n", deckVersion);
+  lhblBootToFW();
+}
 
 static void lighthouseInit(DeckInfo *info)
 {
   if (isInit) return;
 
   uart1Init(230400);
+  lhblInit(I2C1_DEV);
   
   xTaskCreate(lighthouseTask, "LH",
               configMINIMAL_STACK_SIZE, NULL, /*priority*/1, NULL);
@@ -267,3 +355,6 @@ LOG_ADD(LOG_UINT16, width2, &pulseWidth[2])
 LOG_ADD(LOG_UINT16, width3, &pulseWidth[3])
 #endif
 LOG_GROUP_STOP(lighthouse)
+
+
+#endif // DISABLE_LIGHTHOUSE_DRIVER

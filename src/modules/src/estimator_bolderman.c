@@ -30,7 +30,7 @@ The model implemented is the following:
 #define DEG_TO_RAD (PI/180.0f)            // Degrees to radians
 #define RAD_TO_DEG (180.0f/PI)            // Radians to degrees
 #define GRAVITY_MAGNITUDE (9.81f)         // Gravitational constant
-#define PREDICT_RATE 1          // Frequency of which this filter is applied
+#define PREDICT_RATE 25          // Frequency of which this filter is applied
 #define CRAZYFLIE_WEIGHT_grams (27.0f)    // Weight of crazyflie
 #define CONTROL_TO_ACC (GRAVITY_MAGNITUDE*60.0f/CRAZYFLIE_WEIGHT_grams/65536.0f)
                 // variable defining the factor from control input to acceleration
@@ -41,12 +41,13 @@ The model implemented is the following:
 // Output = [ax, ay, az] --> acceleration in body coordinates
 // Output = [x, y, z, ax, ay, az] --> position in global coordinates and acceleration in body coordinates
 #define UPPERBOUND 100.0f                  // Upperbound after which inversion is adjusted
-#define UPPERBOUND_TRACE 100.0f
-#define TS (1.0f/1.0f)
+#define UPPERBOUND_TRACE 1000.0f
+#define TS (1.0f/PREDICT_RATE)
 #define UPPERBOUND_DT 0.1f                // Upperbound of the timestep
 
 // QUEUEING for position measurement
-#define TWR_MEASUREMENT_QUEUE_LENGTH (10)
+#define TWR_MEASUREMENT_QUEUE_LENGTH (50)
+#define MAXDISTANCE 10.0f
 static xQueueHandle twrDataQueue;
 
 bool estimatorBoldermanEnqueueDistance(distanceMeasurement_t *measurement);
@@ -64,6 +65,7 @@ static inline bool estimatorHasTWRMeasurement(distanceMeasurement_t *dist) {
 *******************************************************************************/
 static bool isInit = false;                 // Boolean variable, whether system is initialized
 static int32_t lastPrediction;              // Integer value, containing time sample when last prediction was done
+static bool directposmeas = false;          // False->distance equations, true->converts distance to direct position measurements
 
 // Accumulator variables
 static Axis3f accAccumulator;               // Acceleration, summed over n samples (for average taking purposes)
@@ -98,12 +100,18 @@ static float k[N][NOUT];                    // Kalman gain (Pxy * inv(Pyy))
 static uint8_t ycounter = 0;                // Counter to see how much position measurements have been received
 static float anchor[3][NOUT];               // Anchor positions
 static float y[NOUT];                       // Measurement vectors (just to show how to use static variables)
+static float ydistance[NOUT];               // When using direct distance, distance measurements are saved here instead of in y directly
 static float omega[3];                      // Gyroscopic measurements
 static float acceleration[3];               // Acceleration measurements
 static float tracePxx;                      // Trace of the covariance matrix Pxx
+static float determinantA;
+static float Bnorm[3];
+static float Ainv[3][3];
+static float accext[3];
+
 // The following arrays help with initializing Pxx, and defining q and r
 static float Pxxdiag[N]  = {1.0f,1.0f,1.0f, 0.01f,0.01f,0.01f, 0.01f,0.01f,0.01f};
-static float qdiag[N]    = {0.25f*TS*TS,0.25f*TS*TS,0.25f*TS*TS, 0.5f*TS,0.5f*TS,0.5f*TS, 0.1f*TS,0.1f*TS,0.1f*TS};
+static float qdiag[N]    = {0.5f*TS,0.5f*TS,0.5f*TS, 0.5f*TS,0.5f*TS,0.5f*TS, 0.1f*TS,0.1f*TS,0.1f*TS};
 static float rdiag[NOUT] = {0.25f,0.25f,0.25f};
 // Variables used for debugging
 static float maxX = 0.0f;
@@ -218,7 +226,7 @@ void estimatorBolderman(state_t *state, sensorData_t *sensors, control_t *contro
     // Computes the time step used
     float dt = (float)(osTick-lastPrediction)/configTICK_RATE_HZ;
     if (dt > UPPERBOUND_DT) {
-      consolePrintf("dt exceeds upperbound \n");
+      //consolePrintf("dt exceeds upperbound \n");
     }
 
 
@@ -253,14 +261,20 @@ static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, 
   distanceMeasurement_t dist;
   while (estimatorHasTWRMeasurement(&dist))
   {
-    static uint8_t yindex;
-    yindex = ycounter % 3;
-    y[yindex] = dist.distance;
-    anchor[0][yindex] = dist.x;
-    anchor[1][yindex] = dist.y;
-    anchor[2][yindex] = dist.z;
-    ycounter++;
-    //consolePrintf("Queued measurement: %f", (double)distance);
+    if (dist.distance < MAXDISTANCE) {
+      static uint8_t yindex;
+      yindex = ycounter % 3;
+      if (directposmeas) {
+        ydistance[yindex] = dist.distance;
+      } else {
+        y[yindex] = dist.distance;
+      }
+      anchor[0][yindex] = dist.x;
+      anchor[1][yindex] = dist.y;
+      anchor[2][yindex] = dist.z;
+      ycounter++;
+      //consolePrintf("Queued measurement: %f", (double)distance);
+    }
   }
 
   /* The following things are performed here:
@@ -284,8 +298,23 @@ static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, 
     // Use predicted state and measurement to improve Estimation
     //consolePrintf("Use measurement, %f", (double)ycounter);
     //consolePrintf("\n");
-    estimatorBoldermanDynMeas();
-    ycounter = 0;
+    if (directposmeas) {
+      determinantA = 8*(anchor[0][1]-anchor[0][0])*((anchor[1][2]-anchor[1][0])*(anchor[2][2]-anchor[2][1])-(anchor[2][2]-anchor[2][0])*(anchor[1][2]-anchor[1][1])) + 8*(anchor[0][2]-anchor[0][0])*((anchor[1][2]-anchor[1][1])*(anchor[2][1]-anchor[2][0])-(anchor[1][1]-anchor[1][0])*(anchor[2][2]-anchor[2][1])) + 8*(anchor[0][2]-anchor[0][1])*((anchor[1][1]-anchor[1][0])*(anchor[2][2]-anchor[2][0])-(anchor[2][1]-anchor[2][0])*(anchor[1][2]-anchor[1][0]));
+      if ((determinantA > 0.0f) && (determinantA < 1.0f/UPPERBOUND)) {
+        consolePrintf("same anchor twice \n");
+        // Then we cannot compute the inverse
+        estimatorBoldermanPredEst();
+      } else if ((determinantA < 0.0f) && (determinantA > 1.0f/UPPERBOUND)) {
+        consolePrintf("same anchor twice \n");
+        estimatorBoldermanPredEst();
+      } else {
+        estimatorBoldermanDynMeas();
+        ycounter = 0;
+      }
+    } else {
+      estimatorBoldermanDynMeas();
+      ycounter = 0;
+    }
     // Anchor and distance do not need to be resetted, will be overwritten
   } else {
     // Set predicted value to estimated (otherwise other measurements will be forgotten)
@@ -364,9 +393,9 @@ static void estimatorBoldermanPredict(float dt, float thrust)
     sigmaXplus[8][ii] = sigmaX[8][ii] + (dt/cosf(sigmaX[7][ii])) * (sinf(sigmaX[6][ii])*omega[1] + cosf(sigmaX[6][ii])*omega[2]);
     // Acceleration corrected (measurement rotated and gravity substracted)
     static float acccor[3];
-    acccor[0] = cosf(sigmaX[6][ii])*cosf(sigmaX[8][ii])*acceleration[0] + (cosf(sigmaX[8][ii])*sinf(sigmaX[7][ii])*sinf(sigmaX[6][ii])-cosf(sigmaX[6][ii])*sinf(sigmaX[8][ii]))*acceleration[1] + (cosf(sigmaX[8][ii])*sinf(sigmaX[7][ii])*cosf(sigmaX[6][ii])+sinf(sigmaX[6][ii])*sinf(sigmaX[8][ii]))*acceleration[2];
-    acccor[1] = sinf(sigmaX[8][ii])*cosf(sigmaX[6][ii])*acceleration[0] + (sinf(sigmaX[8][ii])*sinf(sigmaX[7][ii])*sinf(sigmaX[6][ii])+cosf(sigmaX[6][ii])*cosf(sigmaX[8][ii]))*acceleration[1] + (sinf(sigmaX[8][ii])*sinf(sigmaX[7][ii])*cosf(sigmaX[6][ii])-sinf(sigmaX[6][ii])*cosf(sigmaX[8][ii]))*acceleration[2];
-    acccor[2] = -sinf(sigmaX[7][ii])*acceleration[0] + cosf(sigmaX[7][ii])*sinf(sigmaX[6][ii])*acceleration[1] + cosf(sigmaX[7][ii])*cosf(sigmaX[6][ii])*acceleration[2] - GRAVITY_MAGNITUDE;
+    acccor[0] = 0.0f; //cosf(sigmaX[6][ii])*cosf(sigmaX[8][ii])*acceleration[0] + (cosf(sigmaX[8][ii])*sinf(sigmaX[7][ii])*sinf(sigmaX[6][ii])-cosf(sigmaX[6][ii])*sinf(sigmaX[8][ii]))*acceleration[1] + (cosf(sigmaX[8][ii])*sinf(sigmaX[7][ii])*cosf(sigmaX[6][ii])+sinf(sigmaX[6][ii])*sinf(sigmaX[8][ii]))*acceleration[2];
+    acccor[1] = 0.0f; //sinf(sigmaX[8][ii])*cosf(sigmaX[6][ii])*acceleration[0] + (sinf(sigmaX[8][ii])*sinf(sigmaX[7][ii])*sinf(sigmaX[6][ii])+cosf(sigmaX[6][ii])*cosf(sigmaX[8][ii]))*acceleration[1] + (sinf(sigmaX[8][ii])*sinf(sigmaX[7][ii])*cosf(sigmaX[6][ii])-sinf(sigmaX[6][ii])*cosf(sigmaX[8][ii]))*acceleration[2];
+    acccor[2] = 0.0f; //-sinf(sigmaX[7][ii])*acceleration[0] + cosf(sigmaX[7][ii])*sinf(sigmaX[6][ii])*acceleration[1] + cosf(sigmaX[7][ii])*cosf(sigmaX[6][ii])*acceleration[2] - GRAVITY_MAGNITUDE;
     // Velocity
     sigmaXplus[3][ii] = sigmaX[3][ii] + dt*acccor[0];
     sigmaXplus[4][ii] = sigmaX[4][ii] + dt*acccor[1];
@@ -377,9 +406,15 @@ static void estimatorBoldermanPredict(float dt, float thrust)
     sigmaXplus[2][ii] = sigmaX[0][ii] + dt*sigmaX[5][ii] + 0.5f*dt*dt*acccor[2];
     // Now compute the output vector
     // Distances with regards to anchor positions
-    sigmaYplus[0][ii] = sqrtf((sigmaXplus[0][ii]-anchor[0][0])*(sigmaXplus[0][ii]-anchor[0][0]) + (sigmaXplus[1][ii]-anchor[1][0])*(sigmaXplus[1][ii]-anchor[1][0]) + (sigmaXplus[2][ii]-anchor[2][0])*(sigmaXplus[2][ii]-anchor[2][0]));
-    sigmaYplus[1][ii] = sqrtf((sigmaXplus[0][ii]-anchor[0][1])*(sigmaXplus[0][ii]-anchor[0][1]) + (sigmaXplus[1][ii]-anchor[1][1])*(sigmaXplus[1][ii]-anchor[1][1]) + (sigmaXplus[2][ii]-anchor[2][1])*(sigmaXplus[2][ii]-anchor[2][1]));
-    sigmaYplus[2][ii] = sqrtf((sigmaXplus[0][ii]-anchor[0][2])*(sigmaXplus[0][ii]-anchor[0][2]) + (sigmaXplus[1][ii]-anchor[1][2])*(sigmaXplus[1][ii]-anchor[1][2]) + (sigmaXplus[2][ii]-anchor[2][2])*(sigmaXplus[2][ii]-anchor[2][2]));
+    if (directposmeas) {
+      sigmaYplus[0][ii] = sigmaXplus[0][ii];
+      sigmaYplus[1][ii] = sigmaXplus[1][ii];
+      sigmaXplus[2][ii] = sigmaXplus[2][ii];
+    } else {
+      sigmaYplus[0][ii] = sqrtf((sigmaXplus[0][ii]-anchor[0][0])*(sigmaXplus[0][ii]-anchor[0][0]) + (sigmaXplus[1][ii]-anchor[1][0])*(sigmaXplus[1][ii]-anchor[1][0]) + (sigmaXplus[2][ii]-anchor[2][0])*(sigmaXplus[2][ii]-anchor[2][0]));
+      sigmaYplus[1][ii] = sqrtf((sigmaXplus[0][ii]-anchor[0][1])*(sigmaXplus[0][ii]-anchor[0][1]) + (sigmaXplus[1][ii]-anchor[1][1])*(sigmaXplus[1][ii]-anchor[1][1]) + (sigmaXplus[2][ii]-anchor[2][1])*(sigmaXplus[2][ii]-anchor[2][1]));
+      sigmaYplus[2][ii] = sqrtf((sigmaXplus[0][ii]-anchor[0][2])*(sigmaXplus[0][ii]-anchor[0][2]) + (sigmaXplus[1][ii]-anchor[1][2])*(sigmaXplus[1][ii]-anchor[1][2]) + (sigmaXplus[2][ii]-anchor[2][2])*(sigmaXplus[2][ii]-anchor[2][2]));
+    }
   }
 
   // Calculate the predicted state and the predicted output
@@ -416,6 +451,30 @@ static void estimatorBoldermanPredict(float dt, float thrust)
 // Perform the update rule, using the prediction and measurement
 static void estimatorBoldermanDynMeas(void)
 {
+  // Calculate y[] when you have are using the direct position measurement
+  if (directposmeas) {
+    // We have: Ax=b -> x = [xq, yq, zq] -> position quadcopter
+    float multFactor;
+    multFactor = 4.0f/determinantA;
+
+    Ainv[0][0] =  multFactor*((anchor[1][2]-anchor[1][0])*(anchor[2][2]-anchor[2][1])-(anchor[1][2]-anchor[1][1])*(anchor[2][2]-anchor[2][0]));
+    Ainv[0][1] = -multFactor*((anchor[0][2]-anchor[0][0])*(anchor[2][2]-anchor[2][1])-(anchor[0][2]-anchor[0][1])*(anchor[2][2]-anchor[2][0]));
+    Ainv[0][2] =  multFactor*((anchor[0][2]-anchor[0][0])*(anchor[1][2]-anchor[1][1])-(anchor[0][2]-anchor[0][1])*(anchor[1][2]-anchor[1][0]));
+    Ainv[1][0] = -multFactor*((anchor[1][1]-anchor[1][0])*(anchor[2][2]-anchor[2][1])-(anchor[1][2]-anchor[1][1])*(anchor[2][1]-anchor[2][0]));
+    Ainv[1][1] =  multFactor*((anchor[0][1]-anchor[0][0])*(anchor[2][2]-anchor[2][1])-(anchor[0][2]-anchor[0][1])*(anchor[2][1]-anchor[2][0]));
+    Ainv[1][2] = -multFactor*((anchor[0][1]-anchor[0][0])*(anchor[1][2]-anchor[1][1])-(anchor[0][2]-anchor[0][1])*(anchor[1][1]-anchor[1][0]));
+    Ainv[2][0] =  multFactor*((anchor[1][1]-anchor[1][0])*(anchor[2][2]-anchor[2][0])-(anchor[1][2]-anchor[1][0])*(anchor[2][1]-anchor[2][0]));
+    Ainv[2][1] = -multFactor*((anchor[0][1]-anchor[0][0])*(anchor[2][2]-anchor[2][0])-(anchor[0][2]-anchor[0][1])*(anchor[2][1]-anchor[2][0]));
+    Ainv[2][2] =  multFactor*((anchor[0][1]-anchor[0][0])*(anchor[1][2]-anchor[1][0])-(anchor[0][2]-anchor[0][0])*(anchor[1][1]-anchor[1][0]));
+
+    Bnorm[0] = ydistance[0]*ydistance[0] - ydistance[1]*ydistance[1] - anchor[0][0]*anchor[0][0] + anchor[0][1]*anchor[0][1] - anchor[1][0]*anchor[1][0] + anchor[1][1]*anchor[1][1] - anchor[2][0]*anchor[2][0] + anchor[2][1]*anchor[2][1];
+    Bnorm[1] = ydistance[0]*ydistance[0] - ydistance[2]*ydistance[2] - anchor[0][0]*anchor[0][0] + anchor[0][2]*anchor[0][2] - anchor[1][0]*anchor[1][0] + anchor[1][2]*anchor[1][2] - anchor[2][0]*anchor[2][0] + anchor[2][2]*anchor[2][2];
+    Bnorm[2] = ydistance[1]*ydistance[1] - ydistance[2]*ydistance[2] - anchor[0][1]*anchor[0][1] + anchor[0][2]*anchor[0][2] - anchor[1][1]*anchor[1][1] + anchor[1][2]*anchor[1][2] - anchor[2][1]*anchor[2][1] + anchor[2][2]*anchor[2][2];
+
+    y[0] = Ainv[0][0]*Bnorm[0] + Ainv[0][1]*Bnorm[1] + Ainv[0][2]*Bnorm[2];
+    y[1] = Ainv[1][0]*Bnorm[0] + Ainv[1][1]*Bnorm[1] + Ainv[1][2]*Bnorm[2];
+    y[2] = Ainv[2][0]*Bnorm[0] + Ainv[2][1]*Bnorm[1] + Ainv[2][2]*Bnorm[2];
+  }
   // Calculate Pxy, Pyy and K. Performed here, because only necessary when position measurements are available
   for (int ii = 0; ii<N; ii++) {
     for (int jj = 0; jj<NOUT; jj++) {   // Pxy
@@ -542,7 +601,6 @@ static void estimatorBoldermanStateSave(state_t *state, uint32_t osTick)
     .z = x[5]
   };
   // Acceleration -> GLOBAL FRAME (without the gravity and in unit G)
-  static float accext[3];
   accext[0] = cosf(x[6])*cosf(x[8])*acceleration[0] + (cosf(x[8])*sinf(x[7])*sinf(x[6])-cosf(x[6])*sinf(x[8]))*acceleration[1] + (cosf(x[8])*sinf(x[7])*cosf(x[6])+sinf(x[6])*sinf(x[8]))*acceleration[2];
   accext[1] = sinf(x[8])*cosf(x[6])*acceleration[0] + (sinf(x[8])*sinf(x[7])*sinf(x[6])+cosf(x[6])*cosf(x[8]))*acceleration[1] + (sinf(x[8])*sinf(x[7])*cosf(x[6])-sinf(x[6])*cosf(x[8]))*acceleration[2];
   accext[2] = -sinf(x[7])*acceleration[0] + cosf(x[7])*sinf(x[6])*acceleration[1] + cosf(x[7])*cosf(x[6])*acceleration[2] - GRAVITY_MAGNITUDE;
@@ -731,10 +789,30 @@ int cholesky_decomposition(float (*A)[N], float (*R)[N], int n)
   return 1;
 }
 
+static bool stateEstimatorEnqueueMeasurementSafe(xQueueHandle queue, void *measurement);
+
+static bool stateEstimatorEnqueueMeasurementSafe(xQueueHandle queue, void *measurement)
+{
+  portBASE_TYPE result;
+  bool isInInterrupt = (SCB->ICSR & SCB_ICSR_VECTACTIVE_Msk) != 0;
+
+  if (isInInterrupt) {
+    portBASE_TYPE xHigherPriorityTaskWoken = pdFALSE;
+    result = xQueueSendFromISR(queue, measurement, &xHigherPriorityTaskWoken);
+    if(xHigherPriorityTaskWoken == pdTRUE)
+    {
+      portYIELD();
+    }
+  } else {
+    result = xQueueSend(queue, measurement, 0);
+  }
+  return (result==pdTRUE);
+}
+
 bool estimatorBoldermanEnqueueDistance(distanceMeasurement_t *measurement)
 {
   ASSERT(isInit);
-  return xQueueSend(twrDataQueue, measurement, 0);
+  return stateEstimatorEnqueueMeasurementSafe(twrDataQueue, (void *)measurement);
 }
 
 static void calcMaximumEverything(void) {
@@ -753,15 +831,15 @@ static void calcMaximumEverything(void) {
   }
   // Maximum of y
   if (y[0]>0.0f) {
-    maxY = y[0];
+    maxY = ypred[0];
   } else {
-    maxY = -y[0];
+    maxY = -ypred[0];
   }
   for (int ii=1; ii<NOUT; ii++) {
-    if (y[ii] > maxY) {
-      maxY = y[ii];
-    } else if (-y[ii] > maxY) {
-      maxY = -y[ii];
+    if (ypred[ii] > maxY) {
+      maxY = ypred[ii];
+    } else if (-ypred[ii] > maxY) {
+      maxY = -ypred[ii];
     }
   }
   // Maximum of Pxx
@@ -866,9 +944,12 @@ LOG_GROUP_START(BOLDERMAN_est)
   LOG_ADD(LOG_FLOAT, vel_x_est,  &x[3])
   LOG_ADD(LOG_FLOAT, vel_y_est,  &x[4])
   LOG_ADD(LOG_FLOAT, vel_z_est,  &x[5])
-  LOG_ADD(LOG_FLOAT, roll,  &x[6])
-  LOG_ADD(LOG_FLOAT, pitch,  &x[7])
-  LOG_ADD(LOG_FLOAT, yaw,  &x[8])
+  LOG_ADD(LOG_FLOAT, roll,       &x[6])
+  LOG_ADD(LOG_FLOAT, pitch,      &x[7])
+  LOG_ADD(LOG_FLOAT, yaw,        &x[8])
+  LOG_ADD(LOG_FLOAT, acc_x_est,  &accext[0])
+  LOG_ADD(LOG_FLOAT, acc_y_est,  &accext[1])
+  LOG_ADD(LOG_FLOAT, acc_z_est,  &accext[2])
 LOG_GROUP_STOP(BOLDERMAN_est)
 
 // Measurement group
@@ -876,6 +957,12 @@ LOG_GROUP_START(BOLDERMAN_meas)
   LOG_ADD(LOG_FLOAT, dist1, &y[0])
   LOG_ADD(LOG_FLOAT, dist2, &y[1])
   LOG_ADD(LOG_FLOAT, dist3, &y[2])
+  LOG_ADD(LOG_FLOAT, accx, &acceleration[0])
+  LOG_ADD(LOG_FLOAT, accy, &acceleration[1])
+  LOG_ADD(LOG_FLOAT, accz, &acceleration[2])
+  LOG_ADD(LOG_FLOAT, gyrx, &omega[0])
+  LOG_ADD(LOG_FLOAT, gyry, &omega[1])
+  LOG_ADD(LOG_FLOAT, gyrz, &omega[2])
 LOG_GROUP_STOP(BOLDERMAN_meas)
 
 // MAXIMUM VALUES FOR DEBUGGING
