@@ -36,7 +36,7 @@
 
 #include "stabilizer_types.h"
 #include "estimator.h"
-#include "estimator.h"
+#include "estimator_kalman.h"
 
 #include "cf_math.h"
 
@@ -121,9 +121,9 @@ static void flowdeckTask(void *param)
       flowData.dpixelx = (float)accpx;
       flowData.dpixely = (float)accpy;
 #endif
-      // Push measurements into the estimator
+      // Push measurements into the Kalman filter
       if (!useFlowDisabled) {
-        estimatorEnqueueFlow(&flowData);
+        estimatorKalmanEnqueueFlow(&flowData);
       }
     } else {
       outlierCount++;

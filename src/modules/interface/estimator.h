@@ -32,21 +32,14 @@ typedef enum {
   anyEstimator = 0,
   complementaryEstimator,
   kalmanEstimator,
+  boldermanEstimator,
   StateEstimatorTypeCount,
 } StateEstimatorType;
 
+// Prototypes of different functions, how they work is in the .c file presented
 void stateEstimatorInit(StateEstimatorType estimator);
 bool stateEstimatorTest(void);
 void stateEstimator(state_t *state, sensorData_t *sensors, control_t *control, const uint32_t tick);
 StateEstimatorType getStateEstimator(void);
-const char* stateEstimatorGetName();
-
-// Support to incorporate additional sensors into the state estimate via the following functions:
-bool estimatorEnqueueTDOA(const tdoaMeasurement_t *uwb);
-bool estimatorEnqueuePosition(const positionMeasurement_t *pos);
-bool estimatorEnqueueDistance(const distanceMeasurement_t *dist);
-bool estimatorEnqueueTOF(const tofMeasurement_t *tof);
-bool estimatorEnqueueAbsoluteHeight(const heightMeasurement_t *height);
-bool estimatorEnqueueFlow(const flowMeasurement_t *flow);
 
 #endif //__ESTIMATOR_H__

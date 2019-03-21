@@ -40,7 +40,7 @@
 
 #include "locodeck.h"
 
-#include "estimator.h"
+#include "estimator_kalman.h"
 
 #define NBR_OF_RANGES_IN_PACKET   5
 #define DEFAULT_EMERGENCY_STOP_TIMEOUT (1 * RATE_MAIN_LOOP)
@@ -70,12 +70,22 @@ typedef struct {
   int16_t z; // mm
 } __attribute__((packed)) extPositionPackedItem;
 
+/**
+ * Position data cache
+ */
+typedef struct
+{
+  struct CrtpExtPosition targetVal[2];
+  bool activeSide;
+  uint32_t timestamp; // FreeRTOS ticks
+} ExtPositionCache;
+
 // Struct for logging position information
 static positionMeasurement_t ext_pos;
+static ExtPositionCache crtpExtPosCache;
 static CRTPPacket pkRange;
 static uint8_t rangeIndex;
 static bool enableRangeStreamFloat = false;
-static float extPosStdDev = 0.01;
 static bool isInit = false;
 static uint8_t my_id;
 
@@ -115,13 +125,9 @@ static void locSrvCrtpCB(CRTPPacket* pk)
 
 static void extPositionHandler(CRTPPacket* pk)
 {
-  const struct CrtpExtPosition* data = (const struct CrtpExtPosition*)pk;
-
-  ext_pos.x = data->x;
-  ext_pos.y = data->y;
-  ext_pos.z = data->z;
-  ext_pos.stdDev = extPosStdDev;
-  estimatorEnqueuePosition(&ext_pos);
+  crtpExtPosCache.targetVal[!crtpExtPosCache.activeSide] = *((struct CrtpExtPosition*)pk->data);
+  crtpExtPosCache.activeSide = !crtpExtPosCache.activeSide;
+  crtpExtPosCache.timestamp = xTaskGetTickCount();
 }
 
 static void genericLocHandle(CRTPPacket* pk)
@@ -150,15 +156,35 @@ static void extPositionPackedHandler(CRTPPacket* pk)
   for (uint8_t i = 0; i < numItems; ++i) {
     const extPositionPackedItem* item = (const extPositionPackedItem*)&pk->data[i * sizeof(extPositionPackedItem)];
     if (item->id == my_id) {
-      ext_pos.x = item->x / 1000.0f;
-      ext_pos.y = item->y / 1000.0f;
-      ext_pos.z = item->z / 1000.0f;
-      ext_pos.stdDev = extPosStdDev;
-      estimatorEnqueuePosition(&ext_pos);
+      struct CrtpExtPosition position;
+      position.x = item->x / 1000.0f;
+      position.y = item->y / 1000.0f;
+      position.z = item->z / 1000.0f;
+
+      crtpExtPosCache.targetVal[!crtpExtPosCache.activeSide] = position;
+      crtpExtPosCache.activeSide = !crtpExtPosCache.activeSide;
+      crtpExtPosCache.timestamp = xTaskGetTickCount();
 
       break;
     }
   }
+}
+
+bool getExtPosition(state_t *state)
+{
+  // Only use position information if it's valid, recent, and if the kalman filter is enabled
+  if (getStateEstimator() == kalmanEstimator && 
+      (xTaskGetTickCount() - crtpExtPosCache.timestamp) < M2T(5)) {
+    // Get the updated position from the mocap
+    ext_pos.x = crtpExtPosCache.targetVal[crtpExtPosCache.activeSide].x;
+    ext_pos.y = crtpExtPosCache.targetVal[crtpExtPosCache.activeSide].y;
+    ext_pos.z = crtpExtPosCache.targetVal[crtpExtPosCache.activeSide].z;
+    ext_pos.stdDev = 0.01;
+    estimatorKalmanEnqueuePosition(&ext_pos);
+
+    return true;
+  }
+  return false;
 }
 
 void locSrvSendPacket(locsrv_t type, uint8_t *data, uint8_t length)
@@ -204,6 +230,5 @@ LOG_GROUP_START(ext_pos)
 LOG_GROUP_STOP(ext_pos)
 
 PARAM_GROUP_START(locSrv)
-  PARAM_ADD(PARAM_UINT8, enRangeStreamFP32, &enableRangeStreamFloat)
-  PARAM_ADD(PARAM_FLOAT, extPosStdDev, &extPosStdDev)
+PARAM_ADD(PARAM_UINT8, enRangeStreamFP32, &enableRangeStreamFloat)
 PARAM_GROUP_STOP(locSrv)

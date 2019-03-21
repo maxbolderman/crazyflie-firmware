@@ -43,6 +43,7 @@
 #include "stabilizer_types.h"
 
 #include "estimator.h"
+#include "estimator_kalman.h"
 #include "cf_math.h"
 
 // Measurement noise model
@@ -114,7 +115,7 @@ void zRangerTask(void* arg)
       tofData.timestamp = xTaskGetTickCount();
       tofData.distance = (float)range_last * 0.001f; // Scale from [mm] to [m]
       tofData.stdDev = expStdA * (1.0f  + expf( expCoeff * ( tofData.distance - expPointA)));
-      estimatorEnqueueTOF(&tofData);
+      estimatorKalmanEnqueueTOF(&tofData);
     }
   }
 }

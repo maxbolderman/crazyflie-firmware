@@ -30,7 +30,7 @@
 #include "stabilizer_types.h"
 
 bool outlierFilterValidateTdoaSimple(const tdoaMeasurement_t* tdoa);
-bool outlierFilterValidateTdoaSteps(const tdoaMeasurement_t* tdoa, const float error, const vector_t* jacobian, const point_t* estPos);
+bool outlierFilterVaildateTdoaSteps(const tdoaMeasurement_t* tdoa, const float error, const vector_t* jacobian, const point_t* estPos);
 
 void outlierFilterReset();
 

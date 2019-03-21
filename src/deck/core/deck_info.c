@@ -182,7 +182,7 @@ static void enumerateDecks(void)
 
   if (owScan(&nDecks))
   {
-    DECK_INFO_DBG_PRINT("Found %d deck memor%s.\n", nDecks, nDecks>1?"ies":"y");
+    DEBUG_PRINT("Found %d deck memor%s.\n", nDecks, nDecks>1?"ies":"y");
   } else {
     DEBUG_PRINT("Error scanning for deck memories, "
                 "no deck drivers will be initialised\n");
@@ -225,7 +225,6 @@ static void enumerateDecks(void)
 
   // Add build-forced driver
   if (strlen(deck_force) > 0) {
-    DEBUG_PRINT("DECK_FORCE=%s found\n", deck_force);
   	//split deck_force into multiple, separated by colons, if available 
     char delim[] = ":"; 
 
@@ -239,7 +238,7 @@ static void enumerateDecks(void)
       const DeckDriver *driver = deckFindDriverByName(deck_force);
       if (!driver) {
         DEBUG_PRINT("WARNING: compile-time forced driver %s not found\n", deck_force);
-      } else if (driver->init || driver->test) {
+      } else if (driver->init) {
         if (nDecks <= DECK_MAX_COUNT)
         {
           nDecks++;
