@@ -84,10 +84,11 @@ static float Pxxdiag[N] = {1.0f,1.0f,1.0f, 0.01f,0.01f,0.01f, 0.01f,0.01f,0.01f}
 static float q[N][N] = {{0.0f}};
 static float qdiag[N] = {0.5f*TS*TS,0.5f*TS*TS,0.5f*TS*TS, 0.5f*TS,0.5f*TS,0.5f*TS, 0.1f*TS,0.1f*TS,0.1f*TS};
 static float Pyy[NOUT][NOUT] = {{0.0f}};
+static float Pyyhelp[NOUT][NOUT] = {{0.0f}};
 static float r[NOUT][NOUT] = {{0.0f}};
 static float rdiag[NOUT] = {0.25f,0.25f,0.25f};
 static float Pxy[N][NOUT] = {{0.0f}};
-static float determinantPyy;
+//static float determinantPyy;
 static float Pyyinv[NOUT][NOUT] = {{0.0f}};
 static float deltaPxx[N][N] = {{0.0f}};
 static float K[N][NOUT] = {{0.0f}};
@@ -116,6 +117,9 @@ static void safetyAngleBounds(void);
 // Cholesky decomposition
 int assert_element(float val);
 int cholesky_decomposition(float (*A)[N], float (*R)[N], int n);
+// Math functions
+static inline void mat_inv(const arm_matrix_instance_f32 * pSrc, arm_matrix_instance_f32 * pDst)
+{ configASSERT(ARM_MATH_SUCCESS == arm_mat_inverse_f32(pSrc, pDst)); }
 
 
 
@@ -172,8 +176,10 @@ void estimatorBolderman(state_t *state, sensorData_t *sensors, control_t *contro
     magAccumulator.y /= magAccumulatorCount;
     magAccumulator.z /= magAccumulatorCount;
 
+    /*
     if (accAccumulator.x > MAX_ACCELERATION || accAccumulator.y > MAX_ACCELERATION || accAccumulator.z > MAX_ACCELERATION
          || accAccumulator.x < -MAX_ACCELERATION || accAccumulator.y < -MAX_ACCELERATION || accAccumulator.z < -MAX_ACCELERATION) {
+      consolePrintf("Max acceleration exceeded \n");
       if (accAccumulator.x > MAX_ACCELERATION) {
         accAccumulator.x = MAX_ACCELERATION;
       } else if (accAccumulator.x < -MAX_ACCELERATION) {
@@ -190,6 +196,7 @@ void estimatorBolderman(state_t *state, sensorData_t *sensors, control_t *contro
         accAccumulator.z = -MAX_ACCELERATION;
       }
     }
+    */
 
     // CALL update
     float dt = (float)(osTick-lastPrediction)/configTICK_RATE_HZ;
@@ -378,6 +385,7 @@ static void estimatorBoldermanDynMeas(void) {
   }
   // INVERSE of OUTPUT COVARIANCE -> should be invertible
   // CRAMER's rule for computing inverse
+  /*
   determinantPyy = Pyy[0][0]*(Pyy[1][1]*Pyy[2][2]-Pyy[1][2]*Pyy[2][1]) - Pyy[0][1]*(Pyy[1][0]*Pyy[2][2]-Pyy[1][2]*Pyy[2][0]) + Pyy[0][2]*(Pyy[1][0]*Pyy[2][1]-Pyy[2][0]*Pyy[1][1]);
   if (determinantPyy>LIMIT_INVERT || determinantPyy<LIMIT_INVERT) {
     Pyyinv[0][0] = (Pyy[1][1]*Pyy[2][2]-Pyy[1][2]*Pyy[2][1])/determinantPyy;
@@ -394,6 +402,17 @@ static void estimatorBoldermanDynMeas(void) {
     estimatorBoldermanPredEst();
     resetPxx();
   }
+  */
+  // GAUSSIAN ELIMINATION
+  for (int ii=0; ii<NOUT; ii++) {
+    for (int jj=0; jj<NOUT; jj++) {
+      Pyyhelp[ii][jj] = Pyy[ii][jj];
+    }
+  }
+  static arm_matrix_instance_f32 Pyym = {NOUT, NOUT, (float *)Pyyhelp};
+  static arm_matrix_instance_f32 Pyyinvm = {NOUT, NOUT, (float *)Pyyinv};
+  mat_inv(&Pyym, &Pyyinvm);
+
   // KALMAN GAIN -> Kalman gain is given as K=Pxy*inv(Pyy)
   for (int ii=0; ii<N; ii++) {
     for (int jj=0; jj<NOUT; jj++) {
