@@ -44,6 +44,7 @@ WRITTEN BY; Max Bolderman
 #define MIN_DISTANCE (0.01f)        // Minimum distance for measurement which will be used
 #define LIMIT_INVERT (0.000001f)      // Limit after which the numberical inversion is not feasable
 #define LIMIT_TRACE (1000.0f)       // Limit of the covariance matrix trace for reset
+#define MAX_ACCELERATION (20.0f)
 
 // VARIABLES standard
 static bool isInit = false;         // Boolean static if initialization occured yet
@@ -111,7 +112,7 @@ static void estimatorBoldermanStateSave(state_t *state, uint32_t osTick);
 static void resetPxx(void);
 static void calculateRgb(float phi, float theta, float psi);
 static void calculateWinv(float phi, float theta);
-static void estimatorBoldermanAngleBounds(void);
+static void safetyAngleBounds(void);
 // Cholesky decomposition
 int assert_element(float val);
 int cholesky_decomposition(float (*A)[N], float (*R)[N], int n);
@@ -171,9 +172,32 @@ void estimatorBolderman(state_t *state, sensorData_t *sensors, control_t *contro
     magAccumulator.y /= magAccumulatorCount;
     magAccumulator.z /= magAccumulatorCount;
 
+    if (accAccumulator.x > MAX_ACCELERATION || accAccumulator.y > MAX_ACCELERATION || accAccumulator.z > MAX_ACCELERATION
+         || accAccumulator.x < -MAX_ACCELERATION || accAccumulator.y < -MAX_ACCELERATION || accAccumulator.z < -MAX_ACCELERATION) {
+      if (accAccumulator.x > MAX_ACCELERATION) {
+        accAccumulator.x = MAX_ACCELERATION;
+      } else if (accAccumulator.x < -MAX_ACCELERATION) {
+        accAccumulator.x = -MAX_ACCELERATION;
+      }
+      if (accAccumulator.y > MAX_ACCELERATION) {
+        accAccumulator.y = MAX_ACCELERATION;
+      } else if (accAccumulator.y < -MAX_ACCELERATION) {
+        accAccumulator.y = -MAX_ACCELERATION;
+      }
+      if (accAccumulator.z > MAX_ACCELERATION) {
+        accAccumulator.z = MAX_ACCELERATION;
+      } else if (accAccumulator.z < -MAX_ACCELERATION) {
+        accAccumulator.z = -MAX_ACCELERATION;
+      }
+    }
+
     // CALL update
     float dt = (float)(osTick-lastPrediction)/configTICK_RATE_HZ;
-    estimatorBoldermanUpdate(state, thrustAccumulator, &accAccumulator, &gyroAccumulator, &magAccumulator, dt, osTick);
+    if (dt < (2.0f/PREDICT_RATE)) {
+      estimatorBoldermanUpdate(state, thrustAccumulator, &accAccumulator, &gyroAccumulator, &magAccumulator, dt, osTick);
+    } else {
+      consolePrintf("Timestep to large \n");
+    }
 
     // RESET all accumulator variables
     lastPrediction = osTick;
@@ -226,7 +250,7 @@ static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, 
     anchor[2][1] = 0.5f;
     anchor[2][2] = 0.5f;
   } else {
-    consolePrintf("No full rank distance measurement \n");
+    //consolePrintf("No full rank distance measurement \n");
     // Only use dynamical model, no full space measurements available
     estimatorBoldermanPredEst();
   }
@@ -274,7 +298,7 @@ static void estimatorBoldermanPredict(float dt) {
   for (int ii=0; ii<NSIGMA; ii++) {
     // Rotation
     calculateRgb(sigmaX[6][ii], sigmaX[7][ii], sigmaX[8][ii]);
-    calculateWinv(sigmaX[6][ii], sigmaX[6][ii]);
+    calculateWinv(sigmaX[6][ii], sigmaX[7][ii]);
     accglob[0] = Rgb[0][0]*acceleration[0] + Rgb[1][0]*acceleration[1] + Rgb[2][0]*acceleration[2];
     accglob[1] = Rgb[0][1]*acceleration[0] + Rgb[1][1]*acceleration[1] + Rgb[2][1]*acceleration[2];
     accglob[2] = Rgb[0][2]*acceleration[0] + Rgb[1][2]*acceleration[1] + Rgb[2][2]*acceleration[2] - GRAVITY_MAGNITUDE;
@@ -402,7 +426,7 @@ static void estimatorBoldermanDynMeas(void) {
     }
   }
   // ENSURE the angles are given;
-  estimatorBoldermanAngleBounds();
+  safetyAngleBounds();
 }
 // WITHOUT sufficient distance measurements
 static void estimatorBoldermanPredEst(void) {
@@ -442,7 +466,7 @@ static void estimatorBoldermanStateSave(state_t *state, uint32_t osTick) {
   state->attitude = (attitude_t) {
     .timestamp = osTick,
     .roll = (x[6] * RAD_TO_DEG),
-    .pitch = (x[7] * RAD_TO_DEG),
+    .pitch = -1.0f*(x[7] * RAD_TO_DEG),
     .yaw = (x[8] * RAD_TO_DEG)
   };
 }
@@ -460,7 +484,7 @@ bool estimatorBoldermanEnqueueDistance(distanceMeasurement_t *measurement)
         if (measurement->x == anchor[0][ii]
           && measurement->y == anchor[1][ii]
           && measurement->z == anchor[2][ii]) {
-            consolePrintf("Second measurement from same anchor before cleaning \n");
+            //consolePrintf("Second measurement from same anchor before cleaning \n");
             y[ii] = measurement->distance;
             return (pdTRUE);
         }
@@ -592,7 +616,7 @@ static void calculateWinv(float phi, float theta) {
 }
 
 // MIRROR the angles within the allowed region [-PI, +PI]
-static void estimatorBoldermanAngleBounds(void) {
+static void safetyAngleBounds(void) {
   while (x[6]>PI || x[6]<-PI) {
     if (x[6] > PI) {
       x[6] -= 2*PI;
@@ -607,7 +631,7 @@ static void estimatorBoldermanAngleBounds(void) {
       x[7] += 2*PI;
     }
   }
-  while (x[8]<PI || x[8]<-PI) {
+  while (x[8]>PI || x[8]<-PI) {
     if (x[8] > PI) {
       x[8] -= 2*PI;
     } else if (x[8] < -PI) {
