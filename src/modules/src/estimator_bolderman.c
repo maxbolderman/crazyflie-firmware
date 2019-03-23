@@ -28,7 +28,7 @@ WRITTEN BY; Max Bolderman
 #include "cf_math.h"                // Extended library for more involved computations
 
 // DEFINE helpfull parameters
-#define PREDICT_RATE (1)           // Update rate
+#define PREDICT_RATE (10)           // Update rate
 #define DEG_TO_RAD (PI/180.0f)      // Degrees to Radians
 #define RAD_TO_DEG (180.0f/PI)      // Radians to Degrees
 #define GRAVITY_MAGNITUDE (9.81f)   // Gravitational acceleration
