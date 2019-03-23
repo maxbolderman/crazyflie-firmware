@@ -45,6 +45,7 @@ WRITTEN BY; Max Bolderman
 #define LIMIT_INVERT (0.000001f)      // Limit after which the numberical inversion is not feasable
 #define LIMIT_TRACE (1000.0f)       // Limit of the covariance matrix trace for reset
 #define MAX_ACCELERATION (20.0f)
+#define TWR_MEASUREMENT_QUEUE_LENGTH (10)
 
 // VARIABLES standard
 static bool busy = false;           // Statemenet if the quadcopter is busy
@@ -96,7 +97,7 @@ static float K[N][NOUT] = {{0.0f}};
 static float accglob[3];
 static float omegaglob[3];
 static float accext[3] = {0.0f,0.0f,0.0f};                        // Acceleration to externalize
-
+static xQueueHandle twrDataQueue;
 
 // PROTOTYPES of functions used in estimator
 // Orchestrates kalman algorithm
@@ -118,6 +119,12 @@ static void safetyAngleBounds(void);
 // Cholesky decomposition
 int assert_element(float val);
 int cholesky_decomposition(float (*A)[N], float (*R)[N], int n);
+// QUEUE Functions
+bool estimatorBoldermanEnqueueDistance(distanceMeasurement_t *measurement);
+static inline bool estimatorHasTWRMeasurement(distanceMeasurement_t *dist) {
+  return (pdTRUE == xQueueReceive(twrDataQueue, dist, 0));
+}
+static bool stateEstimatorEnqueueMeasurementSafe(xQueueHandle queue, void *measurement);
 
 // Math functions
 static inline void mat_inv(const arm_matrix_instance_f32 * pSrc, arm_matrix_instance_f32 * pDst)
@@ -236,7 +243,28 @@ static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, 
   omega[0] = gyro->x;
   omega[1] = gyro->y;
   omega[2] = gyro->z;
-
+  distanceMeasurement_t dist;
+  while (estimatorHasTWRMeasurement(&dist)) {
+    if (dist.distance < MAX_DISTANCE && dist.distance > MIN_DISTANCE) {
+      // We have the measurement here, use it accordingly:
+      // - if the anchor position is not there yet, put it in
+      // - if the anchor position is there, overwrite the distance (more recent measurements are used)
+      for (int ii=0; ii<3; ii++) {
+        if (dist.x == anchor[0][ii]
+          && dist.y == anchor[1][ii]
+          && dist.z == anchor[2][ii]) {
+            //consolePrintf("Second measurement from same anchor before cleaning \n");
+            y[ii] = dist.distance;
+        }
+      }
+      uint32_t yindex = yCount % 3;
+      y[yindex] = dist.distance;
+      anchor[0][yindex] = dist.x;
+      anchor[1][yindex] = dist.y;
+      anchor[2][yindex] = dist.z;
+      yCount++;
+    }
+  }
   // KALMAN ALGORITHM
   // PREDICT
   estimatorBoldermanPredict(dt);
@@ -511,7 +539,7 @@ static void estimatorBoldermanStateSave(state_t *state, uint32_t osTick) {
     .yaw = (x[8] * RAD_TO_DEG)
   };
 }
-
+/*
 bool estimatorBoldermanEnqueueDistance(distanceMeasurement_t *measurement)
 {
   // Only do this after the initialization
@@ -545,6 +573,27 @@ bool estimatorBoldermanEnqueueDistance(distanceMeasurement_t *measurement)
   }
   return (pdTRUE);
 }
+*/
+bool estimatorBoldermanEnqueueDistance(distanceMeasurement_t *measurement) {
+  ASSERT(isInit);
+  return stateEstimatorEnqueueMeasurementSafe(twrDataQueue, (void *)measurement);
+}
+static bool stateEstimatorEnqueueMeasurementSafe(xQueueHandle queue, void *measurement) {
+  portBASE_TYPE result;
+  bool isInInterrupt = (SCB->ICSR & SCB_ICSR_VECTACTIVE_Msk) != 0;
+
+  if (isInInterrupt) {
+    portBASE_TYPE xHigherPriorityTaskWoken = pdFALSE;
+    result = xQueueSendFromISR(queue, measurement, &xHigherPriorityTaskWoken);
+    if(xHigherPriorityTaskWoken == pdTRUE)
+    {
+      portYIELD();
+    }
+  } else {
+    result = xQueueSend(queue, measurement, 0);
+  }
+  return (result==pdTRUE);
+}
 
 /*
 --------------------------------------------------------------------------------
@@ -561,6 +610,7 @@ void estimatorBoldermanInit(void)
   consolePrintf("Initialization start \n");
 
   // INITIALIZE all variables
+  twrDataQueue = xQueueCreate(TWR_MEASUREMENT_QUEUE_LENGTH, sizeof(distanceMeasurement_t));
   lastPrediction = xTaskGetTickCount();
   thrustAccumulator = 0.0f;
   accAccumulator = (Axis3f){.axis={0}};
