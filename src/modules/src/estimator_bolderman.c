@@ -28,7 +28,7 @@ WRITTEN BY; Max Bolderman
 #include "cf_math.h"                // Extended library for more involved computations
 
 // DEFINE helpfull parameters
-#define PREDICT_RATE (10)           // Update rate
+#define PREDICT_RATE (1)           // Update rate
 #define DEG_TO_RAD (PI/180.0f)      // Degrees to Radians
 #define RAD_TO_DEG (180.0f/PI)      // Radians to Degrees
 #define GRAVITY_MAGNITUDE (9.81f)   // Gravitational acceleration
@@ -69,8 +69,8 @@ static float alpha = 0.1f;
 static float kappa = 0.0f;
 static float beta = 2.0f;
 static float lambda;
-static float Rgb[3][3] = {{0.0f}};             // Rotation matrix
-static float Winv[3][3] = {{0.0f}};            // Angular rate matrix
+//static float Rgb[3][3] = {{0.0f}};             // Rotation matrix
+//static float Winv[3][3] = {{0.0f}};            // Angular rate matrix
 static float Wm[NSIGMA];            // Weights for calculating the mean
 static float Wc[NSIGMA];            // Weights for calculating the covariance
 static float x[N] = {1.0f,4.0f,0.5f, 0.0f,0.0f,0.0f, 0.0f,0.0f,0.0f};
@@ -83,7 +83,7 @@ static float tracePxx = 0.0f;                  // Trace of state covariance matr
 static float Pxx[N][N] = {{0.0f}};             // Covariance state estimate
 static float Pxxdiag[N] = {1.0f,1.0f,1.0f, 0.01f,0.01f,0.01f, 0.01f,0.01f,0.01f};
 static float q[N][N] = {{0.0f}};
-static float qdiag[N] = {0.5f*TS*TS,0.5f*TS*TS,0.5f*TS*TS, 0.5f*TS,0.5f*TS,0.5f*TS, 0.1f*TS,0.1f*TS,0.1f*TS};
+static float qdiag[N] = {0.5f*TS,0.5f*TS,0.5f*TS, 0.5f*TS,0.5f*TS,0.5f*TS, 0.1f*TS,0.1f*TS,0.1f*TS};
 static float Pyy[NOUT][NOUT] = {{0.0f}};
 static float Pyyhelp[NOUT][NOUT] = {{0.0f}};
 static float r[NOUT][NOUT] = {{0.0f}};
@@ -112,12 +112,13 @@ static void estimatorBoldermanStateSave(state_t *state, uint32_t osTick);
 
 // Functions used for computations
 static void resetPxx(void);
-static void calculateRgb(float phi, float theta, float psi);
-static void calculateWinv(float phi, float theta);
+//static void calculateRgb(float phi, float theta, float psi);
+//static void calculateWinv(float phi, float theta);
 static void safetyAngleBounds(void);
 // Cholesky decomposition
 int assert_element(float val);
 int cholesky_decomposition(float (*A)[N], float (*R)[N], int n);
+
 // Math functions
 static inline void mat_inv(const arm_matrix_instance_f32 * pSrc, arm_matrix_instance_f32 * pDst)
 { configASSERT(ARM_MATH_SUCCESS == arm_mat_inverse_f32(pSrc, pDst)); }
@@ -307,14 +308,28 @@ static void estimatorBoldermanPredict(float dt) {
   // PROPOGATE THROUGH DYNAMICS
   for (int ii=0; ii<NSIGMA; ii++) {
     // Rotation
-    calculateRgb(sigmaX[6][ii], sigmaX[7][ii], sigmaX[8][ii]);
-    calculateWinv(sigmaX[6][ii], sigmaX[7][ii]);
-    accglob[0] = Rgb[0][0]*acceleration[0] + Rgb[1][0]*acceleration[1] + Rgb[2][0]*acceleration[2];
-    accglob[1] = Rgb[0][1]*acceleration[0] + Rgb[1][1]*acceleration[1] + Rgb[2][1]*acceleration[2];
-    accglob[2] = Rgb[0][2]*acceleration[0] + Rgb[1][2]*acceleration[1] + Rgb[2][2]*acceleration[2] - GRAVITY_MAGNITUDE;
-    omegaglob[0] = Winv[0][0]*omega[0] + Winv[0][1]*omega[1] + Winv[0][2]*omega[2];
-    omegaglob[1] = Winv[1][0]*omega[0] + Winv[1][1]*omega[1] + Winv[1][2]*omega[2];
-    omegaglob[2] = Winv[2][0]*omega[0] + Winv[2][1]*omega[1] + Winv[2][2]*omega[2];
+    //calculateRgb(sigmaX[6][ii], sigmaX[7][ii], sigmaX[8][ii]);
+    //calculateWinv(sigmaX[6][ii], sigmaX[7][ii]);
+    //accglob[0] = Rgb[0][0]*acceleration[0] + Rgb[1][0]*acceleration[1] + Rgb[2][0]*acceleration[2];
+    //accglob[1] = Rgb[0][1]*acceleration[0] + Rgb[1][1]*acceleration[1] + Rgb[2][1]*acceleration[2];
+    //accglob[2] = Rgb[0][2]*acceleration[0] + Rgb[1][2]*acceleration[1] + Rgb[2][2]*acceleration[2] - GRAVITY_MAGNITUDE;
+    //omegaglob[0] = Winv[0][0]*omega[0] + Winv[0][1]*omega[1] + Winv[0][2]*omega[2];
+    //omegaglob[1] = Winv[1][0]*omega[0] + Winv[1][1]*omega[1] + Winv[1][2]*omega[2];
+    //omegaglob[2] = Winv[2][0]*omega[0] + Winv[2][1]*omega[1] + Winv[2][2]*omega[2];
+
+    accglob[0] = cosf(sigmaX[6][ii])*cosf(sigmaX[8][ii])*acceleration[0] + (cosf(sigmaX[8][ii])*sinf(sigmaX[7][ii])*sinf(sigmaX[6][ii])-cosf(sigmaX[6][ii])*sinf(sigmaX[8][ii]))*acceleration[1] + (cosf(sigmaX[8][ii])*sinf(sigmaX[7][ii])*sinf(sigmaX[6][ii])+sinf(sigmaX[6][ii])*sinf(sigmaX[8][ii]))*acceleration[2];
+    accglob[1] = cosf(sigmaX[6][ii])*sinf(sigmaX[8][ii])*acceleration[0] + (sinf(sigmaX[8][ii])*sinf(sigmaX[7][ii])*sinf(sigmaX[6][ii])+cosf(sigmaX[6][ii])*cosf(sigmaX[8][ii]))*acceleration[1] + (sinf(sigmaX[8][ii])*sinf(sigmaX[7][ii])*cosf(sigmaX[6][ii])-sinf(sigmaX[6][ii])*cosf(sigmaX[8][ii]))*acceleration[2];
+    accglob[2] = -sinf(sigmaX[7][ii])*acceleration[0] + cosf(sigmaX[7][ii])*sinf(sigmaX[6][ii])*acceleration[1] + cosf(sigmaX[7][ii])*cosf(sigmaX[6][ii])*acceleration[2] - GRAVITY_MAGNITUDE;
+    if (cosf(sigmaX[7][ii])>LIMIT_INVERT || cosf(sigmaX[7][ii])<LIMIT_INVERT) {
+      omegaglob[0] = omega[0] + (sinf(sigmaX[7][ii])*sinf(sigmaX[6][ii])/cosf(sigmaX[7][ii]))*omega[1] + (sinf(sigmaX[7][ii])*cosf(sigmaX[6][ii])/cosf(sigmaX[7][ii]))*omega[2];
+      omegaglob[1] = (cosf(sigmaX[7][ii])*cosf(sigmaX[6][ii])/cosf(sigmaX[7][ii]))*omega[1] - (cosf(sigmaX[7][ii])*sinf(sigmaX[6][ii])/cosf(sigmaX[7][ii]))*omega[2];
+      omegaglob[2] = (sinf(sigmaX[6][ii])/cosf(sigmaX[7][ii]))*omega[1] + (cosf(sigmaX[6][ii])/cosf(sigmaX[7][ii]))*omega[2];
+    } else {
+      consolePrintf("Winv not calculated, under limit");
+      omegaglob[0] = 0.0f;
+      omegaglob[1] = 0.0f;
+      omegaglob[2] = 0.0f;
+    }
     // Dynamics
     sigmaXplus[0][ii] = sigmaX[0][ii] + dt*sigmaX[3][ii] + 0.5f*dt*dt*accglob[0];
     sigmaXplus[1][ii] = sigmaX[1][ii] + dt*sigmaX[4][ii] + 0.5f*dt*dt*accglob[1];
@@ -474,10 +489,14 @@ static void estimatorBoldermanStateSave(state_t *state, uint32_t osTick) {
     .z = x[5]
   };
   // ACCELERATION -> GLOBAL FRAME IN UNIT G
-  calculateRgb(x[6], x[7], x[8]);
-  accext[0] = Rgb[0][0]*acceleration[0] + Rgb[1][0]*acceleration[1] + Rgb[2][0]*acceleration[2];
-  accext[1] = Rgb[0][1]*acceleration[0] + Rgb[1][1]*acceleration[1] + Rgb[2][1]*acceleration[2];
-  accext[2] = Rgb[0][2]*acceleration[0] + Rgb[1][2]*acceleration[1] + Rgb[2][2]*acceleration[2] - GRAVITY_MAGNITUDE;
+  //calculateRgb(x[6], x[7], x[8]);
+  //accext[0] = Rgb[0][0]*acceleration[0] + Rgb[1][0]*acceleration[1] + Rgb[2][0]*acceleration[2];
+  //accext[1] = Rgb[0][1]*acceleration[0] + Rgb[1][1]*acceleration[1] + Rgb[2][1]*acceleration[2];
+  //accext[2] = Rgb[0][2]*acceleration[0] + Rgb[1][2]*acceleration[1] + Rgb[2][2]*acceleration[2] - GRAVITY_MAGNITUDE;
+  accext[0] = cosf(x[6])*cosf(x[8])*acceleration[0] + (cosf(x[8])*sinf(x[7])*sinf(x[6])-cosf(x[6])*sinf(x[8]))*acceleration[1] + (cosf(x[8])*sinf(x[7])*sinf(x[6])+sinf(x[6])*sinf(x[8]))*acceleration[2];
+  accext[1] = cosf(x[6])*sinf(x[8])*acceleration[0] + (sinf(x[8])*sinf(x[7])*sinf(x[6])+cosf(x[6])*cosf(x[8]))*acceleration[1] + (sinf(x[8])*sinf(x[7])*cosf(x[6])-sinf(x[6])*cosf(x[8]))*acceleration[2];
+  accext[2] = -sinf(x[7])*acceleration[0] + cosf(x[7])*sinf(x[6])*acceleration[1] + cosf(x[7])*cosf(x[6])*acceleration[2] - GRAVITY_MAGNITUDE;
+
   state->acc = (acc_t) {
     .timestamp = osTick,
     .x = ((accext[0])/GRAVITY_MAGNITUDE),
@@ -603,6 +622,7 @@ static void resetPxx(void) {
     }
   }
 }
+/*
 // Rotation matrix
 static void calculateRgb(float phi, float theta, float psi) {
   Rgb[0][0] = cosf(phi)*cosf(psi);
@@ -640,6 +660,7 @@ static void calculateWinv(float phi, float theta) {
     Winv[2][2] = 0.0f;
   }
 }
+*/
 
 // MIRROR the angles within the allowed region [-PI, +PI]
 static void safetyAngleBounds(void) {
