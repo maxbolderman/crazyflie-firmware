@@ -47,6 +47,7 @@ WRITTEN BY; Max Bolderman
 #define MAX_ACCELERATION (20.0f)
 
 // VARIABLES standard
+static bool busy = false;           // Statemenet if the quadcopter is busy
 static bool isInit = false;         // Boolean static if initialization occured yet
 static int32_t lastPrediction;      // Time of the last prediction (not in seconds but in ticks)
 static Axis3f accAccumulator;       // Acceleration accumulator from measurements
@@ -201,7 +202,9 @@ void estimatorBolderman(state_t *state, sensorData_t *sensors, control_t *contro
     // CALL update
     float dt = (float)(osTick-lastPrediction)/configTICK_RATE_HZ;
     if (dt < (2.0f/PREDICT_RATE)) {
+      busy = true;
       estimatorBoldermanUpdate(state, thrustAccumulator, &accAccumulator, &gyroAccumulator, &magAccumulator, dt, osTick);
+      busy = false;
     } else {
       consolePrintf("Timestep to large \n");
     }
@@ -493,28 +496,32 @@ static void estimatorBoldermanStateSave(state_t *state, uint32_t osTick) {
 bool estimatorBoldermanEnqueueDistance(distanceMeasurement_t *measurement)
 {
   // Only do this after the initialization
-  if (isInit) {
-    // Only use measurement when it is within a reasonable distance
-    if (measurement->distance < MAX_DISTANCE && measurement->distance > MIN_DISTANCE) {
-      // We have the measurement here, use it accordingly:
-      // - if the anchor position is not there yet, put it in
-      // - if the anchor position is there, overwrite the distance (more recent measurements are used)
-      for (int ii=0; ii<3; ii++) {
-        if (measurement->x == anchor[0][ii]
-          && measurement->y == anchor[1][ii]
-          && measurement->z == anchor[2][ii]) {
-            //consolePrintf("Second measurement from same anchor before cleaning \n");
-            y[ii] = measurement->distance;
-            return (pdTRUE);
+  if (busy) {
+    return (pdTRUE);
+  } else {
+    if (isInit) {
+      // Only use measurement when it is within a reasonable distance
+      if (measurement->distance < MAX_DISTANCE && measurement->distance > MIN_DISTANCE) {
+        // We have the measurement here, use it accordingly:
+        // - if the anchor position is not there yet, put it in
+        // - if the anchor position is there, overwrite the distance (more recent measurements are used)
+        for (int ii=0; ii<3; ii++) {
+          if (measurement->x == anchor[0][ii]
+            && measurement->y == anchor[1][ii]
+            && measurement->z == anchor[2][ii]) {
+              //consolePrintf("Second measurement from same anchor before cleaning \n");
+              y[ii] = measurement->distance;
+              return (pdTRUE);
+          }
         }
+        uint32_t yindex = yCount % 3;
+        y[yindex] = measurement->distance;
+        anchor[0][yindex] = measurement->x;
+        anchor[1][yindex] = measurement->y;
+        anchor[2][yindex] = measurement->z;
+        yCount++;
+        return (pdTRUE);
       }
-      uint32_t yindex = yCount % 3;
-      y[yindex] = measurement->distance;
-      anchor[0][yindex] = measurement->x;
-      anchor[1][yindex] = measurement->y;
-      anchor[2][yindex] = measurement->z;
-      yCount++;
-      return (pdTRUE);
     }
   }
   return (pdTRUE);
