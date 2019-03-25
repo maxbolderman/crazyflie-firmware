@@ -17,6 +17,7 @@ WRITTEN BY; Max Bolderman
 
 // INCLUDE all libraries necessary for the state estimation
 #include "estimator_bolderman.h"    // header file of this model
+#include "outlierFilter.h"
 #include "stm32f4xx.h"
 #include "FreeRTOS.h"
 #include "queue.h"
@@ -42,7 +43,8 @@ WRITTEN BY; Max Bolderman
 #define TS (1.0f/PREDICT_RATE)      // Time Step
 #define MAX_DISTANCE (10.0f)        // Maximum distance for measurement which will be used
 #define MIN_DISTANCE (0.01f)        // Minimum distance for measurement which will be used
-#define LIMIT_INVERT (0.000001f)      // Limit after which the numberical inversion is not feasable
+#define LIMIT_CHOLESKY (0.00001f)
+#define LIMIT_INVERT (0.0001f)      // Limit after which the numberical inversion is not feasable
 #define LIMIT_TRACE (1000.0f)       // Limit of the covariance matrix trace for reset
 #define MAX_ACCELERATION (20.0f)
 
@@ -83,7 +85,7 @@ static float tracePxx = 0.0f;                  // Trace of state covariance matr
 static float Pxx[N][N] = {{0.0f}};             // Covariance state estimate
 static float Pxxdiag[N] = {1.0f,1.0f,1.0f, 0.01f,0.01f,0.01f, 0.01f,0.01f,0.01f};
 static float q[N][N] = {{0.0f}};
-static float qdiag[N] = {0.5f*TS,0.5f*TS,0.5f*TS, 0.5f*TS,0.5f*TS,0.5f*TS, 0.1f*TS,0.1f*TS,0.1f*TS};
+static float qdiag[N] = {0.5f*TS*TS,0.5f*TS*TS,0.5f*TS*TS, 0.5f*TS,0.5f*TS,0.5f*TS, 0.1f*TS,0.1f*TS,0.1f*TS};
 static float Pyy[NOUT][NOUT] = {{0.0f}};
 static float Pyyhelp[NOUT][NOUT] = {{0.0f}};
 static float r[NOUT][NOUT] = {{0.0f}};
@@ -261,7 +263,9 @@ static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, 
     anchor[2][1] = 0.5f;
     anchor[2][2] = 0.5f;
   } else {
-    //consolePrintf("No full rank distance measurement \n");
+    if (isInit) {
+      consolePrintf("No full rank distance measurement \n");
+    }
     // Only use dynamical model, no full space measurements available
     estimatorBoldermanPredEst();
   }
@@ -440,6 +444,12 @@ static void estimatorBoldermanDynMeas(void) {
       }
     }
   }
+  for (int ii=0; ii<NOUT; ii++) {
+    for (int jj=0; jj<NOUT; jj++) {
+      Pyyinv[ii][jj] = 0.0f;
+      Pyy[ii][jj] = 0.0f;
+    }
+  }
   // COVARIANCE UPDATE -> Pxxnew = Pxxold - K*Pyy*trans(K) = Pxxold - Pxy*inv(Pyy)*Pyy*trans(K) = Pxxold - Pxy*trans(K)
   // deltaPxx = Pxy*trans(K)
   for (int ii=0; ii<N; ii++) {
@@ -462,6 +472,14 @@ static void estimatorBoldermanDynMeas(void) {
       Pxx[ii][jj] -= deltaPxx[ii][jj];
     }
   }
+  /*
+  for (int ii=0; ii<NOUT; ii++) {
+    for (int jj=0; jj<N; jj++) {
+      Pxy[jj][ii] = 0.0f;
+      K[jj][ii] = 0.0f;
+    }
+  }
+  */
   // ENSURE the angles are given;
   safetyAngleBounds();
 }
@@ -512,8 +530,20 @@ static void estimatorBoldermanStateSave(state_t *state, uint32_t osTick) {
   };
 }
 
-bool estimatorBoldermanEnqueueDistance(distanceMeasurement_t *measurement)
-{
+/*
+bool estimatorBoldermanEnqueueDistance(distanceMeasurement_t *measurement) {
+  if (isInit) {
+    uint32_t yindex = yCount % 3;
+    y[yindex] = measurement->distance;
+    anchor[0][yindex] = measurement->x;
+    anchor[1][yindex] = measurement->y;
+    anchor[2][yindex] = measurement->z;
+    yCount++;
+  }
+  return (pdTRUE);
+}
+*/
+bool estimatorBoldermanEnqueueDistance(distanceMeasurement_t *measurement) {
   // Only do this after the initialization
   if (busy) {
     return (pdTRUE);
@@ -662,6 +692,7 @@ static void calculateWinv(float phi, float theta) {
 }
 */
 
+
 // MIRROR the angles within the allowed region [-PI, +PI]
 static void safetyAngleBounds(void) {
   while (x[6]>PI || x[6]<-PI) {
@@ -696,7 +727,7 @@ int assert_element(float val){
    * or equal to some limit, ensuring that the decomposition is done
    * correctly and allowing detection of non-PSD matrices A
    **********************************************************************/
-  float limit = LIMIT_INVERT;
+  float limit = LIMIT_CHOLESKY;
   if (val < limit){
     consolePrintf("Cholesky failed, lower than limit. \n");
     return 1;
