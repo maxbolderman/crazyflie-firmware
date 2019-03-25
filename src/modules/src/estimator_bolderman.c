@@ -285,9 +285,14 @@ static void estimatorBoldermanPredict(float dt) {
   int status = 0;
   status = cholesky_decomposition(Pxx,delta,N);
   if (status == 0) {
+    consolePrintf("Cholesky failed");
     // Then no good solution delta is found, so reinitialize Pxx
     resetPxx();
+    memset(delta, 0, sizeof(delta));
     status = cholesky_decomposition(Pxx,delta,N);
+    if (status == 0) {
+      consolePrintf("Cholesky failes after resetting Pxx");
+    }
   }
   // Fill in in sigmaX
   for (int ii = 0; ii<NSIGMA; ii++) {
