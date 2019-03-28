@@ -49,7 +49,6 @@ WRITTEN BY; Max Bolderman
 #define MAX_ACCELERATION (20.0f)
 
 // VARIABLES standard
-static bool busy = false;           // Statemenet if the quadcopter is busy
 static bool isInit = false;         // Boolean static if initialization occured yet
 static int32_t lastPrediction;      // Time of the last prediction (not in seconds but in ticks)
 static Axis3f accAccumulator;       // Acceleration accumulator from measurements
@@ -77,28 +76,15 @@ static float Wm[NSIGMA];            // Weights for calculating the mean
 static float Wc[NSIGMA];            // Weights for calculating the covariance
 static float x[N] = {1.0f,4.0f,0.5f, 0.0f,0.0f,0.0f, 0.0f,0.0f,0.0f};
 static float xpred[N];                // Predicted state, where measurements are not used to update yet
-static float ypred[NOUT];
-static float sigmaX[N][NSIGMA] = {{0.0f}};     // Sigmapoints
-static float sigmaXplus[N][NSIGMA] = {{0.0f}}; // Sigmapoints propagated through dynamics
-static float sigmaYplus[NOUT][NSIGMA] = {{0.0f}};
 static float tracePxx = 0.0f;                  // Trace of state covariance matrix
 static float Pxx[N][N] = {{0.0f}};             // Covariance state estimate
 static float Pxxdiag[N] = {1.0f,1.0f,1.0f, 0.01f,0.01f,0.01f, 0.01f,0.01f,0.01f};
+static float sigmaXplus[N][NSIGMA] = {{0.0f}};
 static float q[N][N] = {{0.0f}};
 static float qdiag[N] = {0.5f*TS*TS,0.5f*TS*TS,0.5f*TS*TS, 0.5f*TS,0.5f*TS,0.5f*TS, 0.1f*TS,0.1f*TS,0.1f*TS};
-static float Pyy[NOUT][NOUT] = {{0.0f}};
-static float Pyyhelp[NOUT][NOUT] = {{0.0f}};
 static float r[NOUT][NOUT] = {{0.0f}};
 static float rdiag[NOUT] = {0.25f,0.25f,0.25f};
-static float Pxy[N][NOUT] = {{0.0f}};
 //static float determinantPyy;
-static float Pyyinv[NOUT][NOUT] = {{0.0f}};
-static float deltaPxx[N][N] = {{0.0f}};
-static float K[N][NOUT] = {{0.0f}};
-static float accglob[3];
-static float omegaglob[3];
-static float accext[3] = {0.0f,0.0f,0.0f};                        // Acceleration to externalize
-
 
 // PROTOTYPES of functions used in estimator
 // Orchestrates kalman algorithm
@@ -125,7 +111,7 @@ int cholesky_decomposition(float (*A)[N], float (*R)[N], int n);
 static inline void mat_inv(const arm_matrix_instance_f32 * pSrc, arm_matrix_instance_f32 * pDst)
 { configASSERT(ARM_MATH_SUCCESS == arm_mat_inverse_f32(pSrc, pDst)); }
 
-
+//// THIS 
 
 /*
 --------------------------------------------------------------------------------
@@ -166,7 +152,8 @@ void estimatorBolderman(state_t *state, sensorData_t *sensors, control_t *contro
   if ((osTick-lastPrediction) >= configTICK_RATE_HZ/PREDICT_RATE
         && gyroAccumulatorCount > 0
         && accAccumulatorCount > 0
-        && thrustAccumulatorCount > 0)
+        && thrustAccumulatorCount > 0
+        && magAccumulatorCount > 0)
   {
     // AVERAGE the measurements
     thrustAccumulator /= thrustAccumulatorCount;
@@ -205,9 +192,7 @@ void estimatorBolderman(state_t *state, sensorData_t *sensors, control_t *contro
     // CALL update
     float dt = (float)(osTick-lastPrediction)/configTICK_RATE_HZ;
     if (dt < (2.0f/PREDICT_RATE)) {
-      busy = true;
       estimatorBoldermanUpdate(state, thrustAccumulator, &accAccumulator, &gyroAccumulator, &magAccumulator, dt, osTick);
-      busy = false;
     } else {
       consolePrintf("Timestep to large \n");
     }
@@ -242,7 +227,6 @@ static void estimatorBoldermanUpdate(state_t *state, float thrust, Axis3f *acc, 
   // KALMAN ALGORITHM
   // PREDICT
   estimatorBoldermanPredict(dt);
-
   // UPDATE
   if (yCount >= 3) {
     // Combine dynamical model with measurements
@@ -288,13 +272,13 @@ static void estimatorBoldermanPredict(float dt) {
     consolePrintf("Cholesky failed");
     // Then no good solution delta is found, so reinitialize Pxx
     resetPxx();
-    memset(delta, 0, sizeof(delta));
     status = cholesky_decomposition(Pxx,delta,N);
     if (status == 0) {
       consolePrintf("Cholesky failes after resetting Pxx");
     }
   }
   // Fill in in sigmaX
+  float sigmaX[N][NSIGMA];
   for (int ii = 0; ii<NSIGMA; ii++) {
     for (int jj = 0; jj<N; jj++) {
       // define sigmaX for each entry
@@ -325,7 +309,8 @@ static void estimatorBoldermanPredict(float dt) {
     //omegaglob[0] = Winv[0][0]*omega[0] + Winv[0][1]*omega[1] + Winv[0][2]*omega[2];
     //omegaglob[1] = Winv[1][0]*omega[0] + Winv[1][1]*omega[1] + Winv[1][2]*omega[2];
     //omegaglob[2] = Winv[2][0]*omega[0] + Winv[2][1]*omega[1] + Winv[2][2]*omega[2];
-
+    float accglob[3];
+    float omegaglob[3];
     accglob[0] = cosf(sigmaX[6][ii])*cosf(sigmaX[8][ii])*acceleration[0] + (cosf(sigmaX[8][ii])*sinf(sigmaX[7][ii])*sinf(sigmaX[6][ii])-cosf(sigmaX[6][ii])*sinf(sigmaX[8][ii]))*acceleration[1] + (cosf(sigmaX[8][ii])*sinf(sigmaX[7][ii])*sinf(sigmaX[6][ii])+sinf(sigmaX[6][ii])*sinf(sigmaX[8][ii]))*acceleration[2];
     accglob[1] = cosf(sigmaX[6][ii])*sinf(sigmaX[8][ii])*acceleration[0] + (sinf(sigmaX[8][ii])*sinf(sigmaX[7][ii])*sinf(sigmaX[6][ii])+cosf(sigmaX[6][ii])*cosf(sigmaX[8][ii]))*acceleration[1] + (sinf(sigmaX[8][ii])*sinf(sigmaX[7][ii])*cosf(sigmaX[6][ii])-sinf(sigmaX[6][ii])*cosf(sigmaX[8][ii]))*acceleration[2];
     accglob[2] = -sinf(sigmaX[7][ii])*acceleration[0] + cosf(sigmaX[7][ii])*sinf(sigmaX[6][ii])*acceleration[1] + cosf(sigmaX[7][ii])*cosf(sigmaX[6][ii])*acceleration[2] - GRAVITY_MAGNITUDE;
@@ -359,6 +344,7 @@ static void estimatorBoldermanPredict(float dt) {
     xpred[6] += Wm[ii]*sigmaXplus[6][ii];
     xpred[7] += Wm[ii]*sigmaXplus[7][ii];
     xpred[8] += Wm[ii]*sigmaXplus[8][ii];
+
   }
 
   // COVARIANCE
@@ -379,10 +365,9 @@ static void estimatorBoldermanPredict(float dt) {
 // UPDATE
 // WITH sufficient measurements
 static void estimatorBoldermanDynMeas(void) {
+  float sigmaYplus[NOUT][NSIGMA];
   // Reset ypred
-  for (int ii=0; ii<NOUT; ii++) {
-    ypred[ii] = 0.0f;
-  }
+  float ypred[NOUT] = {0.0f};
   // REDIFINE POSITION IN DISTANCE -> measurement equations
   for (int ii=0; ii<NSIGMA; ii++) {
     sigmaYplus[0][ii] = sqrtf((sigmaXplus[0][ii]-anchor[0][0])*(sigmaXplus[0][ii]-anchor[0][0]) + (sigmaXplus[1][ii]-anchor[1][0])*(sigmaXplus[1][ii]-anchor[1][0]) + (sigmaXplus[2][ii]-anchor[2][0])*(sigmaXplus[2][ii]-anchor[2][0]));
@@ -393,6 +378,7 @@ static void estimatorBoldermanDynMeas(void) {
     ypred[2] += Wm[ii] * sigmaYplus[2][ii];
   }
   // OUTPUT COVARIANCE -> measurement equations covariance
+  float Pyy[NOUT][NOUT];
   for (int ii=0; ii<NOUT; ii++) {
     for (int jj=0; jj<NOUT; jj++) {
       Pyy[ii][jj] = r[ii][jj];
@@ -402,6 +388,7 @@ static void estimatorBoldermanDynMeas(void) {
     }
   }
   // CROSS COVARIANCE -> state and output covariance
+  float Pxy[N][NOUT];
   for (int ii=0; ii<N; ii++) {
     for (int jj=0; jj<NOUT; jj++) {
       Pxy[ii][jj] = 0.0f;
@@ -431,16 +418,20 @@ static void estimatorBoldermanDynMeas(void) {
   }
   */
   // GAUSSIAN ELIMINATION
+  float Pyyhelp[NOUT][NOUT];
   for (int ii=0; ii<NOUT; ii++) {
     for (int jj=0; jj<NOUT; jj++) {
       Pyyhelp[ii][jj] = Pyy[ii][jj];
     }
   }
-  static arm_matrix_instance_f32 Pyym = {NOUT, NOUT, (float *)Pyyhelp};
-  static arm_matrix_instance_f32 Pyyinvm = {NOUT, NOUT, (float *)Pyyinv};
+  float Pyyinv[NOUT][NOUT] = {{0.0f}};
+  arm_matrix_instance_f32 Pyym = {NOUT, NOUT, (float *)Pyyhelp};
+  arm_matrix_instance_f32 Pyyinvm = {NOUT, NOUT, (float *)Pyyinv};
   mat_inv(&Pyym, &Pyyinvm);
 
+
   // KALMAN GAIN -> Kalman gain is given as K=Pxy*inv(Pyy)
+  float K[N][NOUT];
   for (int ii=0; ii<N; ii++) {
     for (int jj=0; jj<NOUT; jj++) {
       K[ii][jj] = 0.0f;
@@ -449,14 +440,9 @@ static void estimatorBoldermanDynMeas(void) {
       }
     }
   }
-  for (int ii=0; ii<NOUT; ii++) {
-    for (int jj=0; jj<NOUT; jj++) {
-      Pyyinv[ii][jj] = 0.0f;
-      Pyy[ii][jj] = 0.0f;
-    }
-  }
   // COVARIANCE UPDATE -> Pxxnew = Pxxold - K*Pyy*trans(K) = Pxxold - Pxy*inv(Pyy)*Pyy*trans(K) = Pxxold - Pxy*trans(K)
   // deltaPxx = Pxy*trans(K)
+  float deltaPxx[N][N];
   for (int ii=0; ii<N; ii++) {
     for (int jj=0; jj<N; jj++) {
       deltaPxx[ii][jj] = 0.0f;
@@ -516,6 +502,7 @@ static void estimatorBoldermanStateSave(state_t *state, uint32_t osTick) {
   //accext[0] = Rgb[0][0]*acceleration[0] + Rgb[1][0]*acceleration[1] + Rgb[2][0]*acceleration[2];
   //accext[1] = Rgb[0][1]*acceleration[0] + Rgb[1][1]*acceleration[1] + Rgb[2][1]*acceleration[2];
   //accext[2] = Rgb[0][2]*acceleration[0] + Rgb[1][2]*acceleration[1] + Rgb[2][2]*acceleration[2] - GRAVITY_MAGNITUDE;
+  float accext[3];
   accext[0] = cosf(x[6])*cosf(x[8])*acceleration[0] + (cosf(x[8])*sinf(x[7])*sinf(x[6])-cosf(x[6])*sinf(x[8]))*acceleration[1] + (cosf(x[8])*sinf(x[7])*sinf(x[6])+sinf(x[6])*sinf(x[8]))*acceleration[2];
   accext[1] = cosf(x[6])*sinf(x[8])*acceleration[0] + (sinf(x[8])*sinf(x[7])*sinf(x[6])+cosf(x[6])*cosf(x[8]))*acceleration[1] + (sinf(x[8])*sinf(x[7])*cosf(x[6])-sinf(x[6])*cosf(x[8]))*acceleration[2];
   accext[2] = -sinf(x[7])*acceleration[0] + cosf(x[7])*sinf(x[6])*acceleration[1] + cosf(x[7])*cosf(x[6])*acceleration[2] - GRAVITY_MAGNITUDE;
@@ -548,36 +535,49 @@ bool estimatorBoldermanEnqueueDistance(distanceMeasurement_t *measurement) {
   return (pdTRUE);
 }
 */
+
+/*
+static bool is_using_distance_measurement;
+
+bool can_enqueue_distance_measurement(void){
+  return is_using_distance_measurement;
+}
+
+void has_enqueued_distance_measurement(void){
+  is_using_distance_measurement = false;
+}
+*/
+
 bool estimatorBoldermanEnqueueDistance(distanceMeasurement_t *measurement) {
   // Only do this after the initialization
-  if (busy) {
-    return (pdTRUE);
-  } else {
-    if (isInit) {
-      // Only use measurement when it is within a reasonable distance
-      if (measurement->distance < MAX_DISTANCE && measurement->distance > MIN_DISTANCE) {
-        // We have the measurement here, use it accordingly:
-        // - if the anchor position is not there yet, put it in
-        // - if the anchor position is there, overwrite the distance (more recent measurements are used)
-        for (int ii=0; ii<3; ii++) {
-          if (measurement->x == anchor[0][ii]
-            && measurement->y == anchor[1][ii]
-            && measurement->z == anchor[2][ii]) {
-              //consolePrintf("Second measurement from same anchor before cleaning \n");
-              y[ii] = measurement->distance;
-              return (pdTRUE);
-          }
+  if (isInit) {
+    // Only use measurement when it is within a reasonable distance
+    if (measurement->distance < MAX_DISTANCE && measurement->distance > MIN_DISTANCE) {
+      // We have the measurement here, use it accordingly:
+      // - if the anchor position is not there yet, put it in
+      // - if the anchor position is there, overwrite the distance (more recent measurements are used)
+      for (int ii=0; ii<3; ii++) {
+        if (measurement->x == anchor[0][ii]
+          && measurement->y == anchor[1][ii]
+          && measurement->z == anchor[2][ii]) {
+            //consolePrintf("Second measurement from same anchor before cleaning \n");
+            y[ii] = measurement->distance;
+            return (pdTRUE);
         }
-        uint32_t yindex = yCount % 3;
-        y[yindex] = measurement->distance;
-        anchor[0][yindex] = measurement->x;
-        anchor[1][yindex] = measurement->y;
-        anchor[2][yindex] = measurement->z;
-        yCount++;
-        return (pdTRUE);
       }
+      uint32_t yindex = yCount % 3;
+      y[yindex] = measurement->distance;
+      anchor[0][yindex] = measurement->x;
+      anchor[1][yindex] = measurement->y;
+      anchor[2][yindex] = measurement->z;
+      yCount++;
+      return (pdTRUE);
+    } else {
+      consolePrintf("Bad measurement");
     }
   }
+
+  //is_using_distance_measurement = true;
   return (pdTRUE);
 }
 
@@ -595,6 +595,7 @@ void estimatorBoldermanInit(void)
 {
   consolePrintf("Initialization start \n");
 
+  //is_using_distance_measurement = true;
   // INITIALIZE all variables
   lastPrediction = xTaskGetTickCount();
   thrustAccumulator = 0.0f;

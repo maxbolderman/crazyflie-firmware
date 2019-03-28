@@ -257,14 +257,17 @@ static uint32_t rxcallback(dwDevice_t *dev) {
       if ((options->combinedAnchorPositionOk || options->anchorPosition[current_anchor].timestamp) &&
           (diff < (OUTLIER_TH*stddev))) {
 
-        distanceMeasurement_t dist;
-        dist.distance = state.distance[current_anchor];
-        dist.x = options->anchorPosition[current_anchor].x;
-        dist.y = options->anchorPosition[current_anchor].y;
-        dist.z = options->anchorPosition[current_anchor].z;
-        dist.stdDev = 0.25;
-        //estimatorKalmanEnqueueDistance(&dist);
-        estimatorBoldermanEnqueueDistance(&dist);
+        //if (can_enqueue_distance_measurement()){
+          distanceMeasurement_t dist;
+          dist.distance = state.distance[current_anchor];
+          dist.x = options->anchorPosition[current_anchor].x;
+          dist.y = options->anchorPosition[current_anchor].y;
+          dist.z = options->anchorPosition[current_anchor].z;
+          dist.stdDev = 0.25;
+          //estimatorKalmanEnqueueDistance(&dist);
+          //has_enqueued_distance_measurement();
+          estimatorBoldermanEnqueueDistance(&dist);
+        //}
       }
 
       if (options->useTdma && current_anchor == 0) {
