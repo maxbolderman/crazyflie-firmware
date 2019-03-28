@@ -111,7 +111,7 @@ int cholesky_decomposition(float (*A)[N], float (*R)[N], int n);
 static inline void mat_inv(const arm_matrix_instance_f32 * pSrc, arm_matrix_instance_f32 * pDst)
 { configASSERT(ARM_MATH_SUCCESS == arm_mat_inverse_f32(pSrc, pDst)); }
 
-//// THIS 
+
 
 /*
 --------------------------------------------------------------------------------
@@ -344,7 +344,6 @@ static void estimatorBoldermanPredict(float dt) {
     xpred[6] += Wm[ii]*sigmaXplus[6][ii];
     xpred[7] += Wm[ii]*sigmaXplus[7][ii];
     xpred[8] += Wm[ii]*sigmaXplus[8][ii];
-
   }
 
   // COVARIANCE
@@ -797,13 +796,13 @@ LOG_GROUP_START(BOLDERMAN_state)
   LOG_ADD(LOG_FLOAT, yaw_est, &x[8])
 LOG_GROUP_STOP(BOLDERMAN_state)
 LOG_GROUP_START(BOLDERMAN_meas)
-  LOG_ADD(LOG_FLOAT, acc_x, &acceleration[0])
-  LOG_ADD(LOG_FLOAT, acc_y, &acceleration[1])
-  LOG_ADD(LOG_FLOAT, acc_z, &acceleration[2])
-  LOG_ADD(LOG_FLOAT, gyro_x, &omega[0])
-  LOG_ADD(LOG_FLOAT, gyro_y, &omega[1])
-  LOG_ADD(LOG_FLOAT, gyro_z, &omega[2])
-  LOG_ADD(LOG_FLOAT, dist_1, &y[0])
-  LOG_ADD(LOG_FLOAT, dist_2, &y[1])
-  LOG_ADD(LOG_FLOAT, dist_3, &y[2])
+  LOG_ADD(LOG_FLOAT, covx, &Pxx[0][0])
+  LOG_ADD(LOG_FLOAT, covy, &Pxx[1][1])
+  LOG_ADD(LOG_FLOAT, covz, &Pxx[2][2])
+  LOG_ADD(LOG_FLOAT, covxd, &Pxx[3][3])
+  LOG_ADD(LOG_FLOAT, covyd, &Pxx[4][4])
+  LOG_ADD(LOG_FLOAT, covzd, &Pxx[5][5])
+  LOG_ADD(LOG_FLOAT, covroll, &Pxx[6][6])
+  LOG_ADD(LOG_FLOAT, covpitch, &Pxx[7][7])
+  LOG_ADD(LOG_FLOAT, covyaw, &Pxx[8][8])
 LOG_GROUP_STOP(BOLDERMAN_meas)
