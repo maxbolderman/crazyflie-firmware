@@ -9,5 +9,5 @@ void estimatorBoldermanInit(void);
 bool estimatorBoldermanTest(void);
 void estimatorBolderman(state_t *state, sensorData_t *sensors, control_t *control, const uint32_t tick);
 bool estimatorBoldermanEnqueueDistance(distanceMeasurement_t *measurement);
-
+//bool estimatorBoldermanIsBusy(void);
 #endif // __ESTIMATOR_BOLDERMAN_H__

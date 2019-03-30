@@ -77,27 +77,15 @@ static float Wm[NSIGMA];            // Weights for calculating the mean
 static float Wc[NSIGMA];            // Weights for calculating the covariance
 static float x[N] = {1.0f,4.0f,0.5f, 0.0f,0.0f,0.0f, 0.0f,0.0f,0.0f};
 static float xpred[N];                // Predicted state, where measurements are not used to update yet
-static float ypred[NOUT];
-static float sigmaX[N][NSIGMA] = {{0.0f}};     // Sigmapoints
 static float sigmaXplus[N][NSIGMA] = {{0.0f}}; // Sigmapoints propagated through dynamics
-static float sigmaYplus[NOUT][NSIGMA] = {{0.0f}};
 static float tracePxx = 0.0f;                  // Trace of state covariance matrix
 static float Pxx[N][N] = {{0.0f}};             // Covariance state estimate
 static float Pxxdiag[N] = {1.0f,1.0f,1.0f, 0.01f,0.01f,0.01f, 0.01f,0.01f,0.01f};
 static float q[N][N] = {{0.0f}};
 static float qdiag[N] = {0.5f*TS*TS,0.5f*TS*TS,0.5f*TS*TS, 0.5f*TS,0.5f*TS,0.5f*TS, 0.1f*TS,0.1f*TS,0.1f*TS};
-static float Pyy[NOUT][NOUT] = {{0.0f}};
-static float Pyyhelp[NOUT][NOUT] = {{0.0f}};
 static float r[NOUT][NOUT] = {{0.0f}};
 static float rdiag[NOUT] = {0.25f,0.25f,0.25f};
-static float Pxy[N][NOUT] = {{0.0f}};
 //static float determinantPyy;
-static float Pyyinv[NOUT][NOUT] = {{0.0f}};
-static float deltaPxx[N][N] = {{0.0f}};
-static float K[N][NOUT] = {{0.0f}};
-static float accglob[3];
-static float omegaglob[3];
-static float accext[3] = {0.0f,0.0f,0.0f};                        // Acceleration to externalize
 
 
 // PROTOTYPES of functions used in estimator
@@ -295,6 +283,7 @@ static void estimatorBoldermanPredict(float dt) {
     }
   }
   // Fill in in sigmaX
+  float sigmaX[N][NSIGMA];
   for (int ii = 0; ii<NSIGMA; ii++) {
     for (int jj = 0; jj<N; jj++) {
       // define sigmaX for each entry
@@ -325,7 +314,8 @@ static void estimatorBoldermanPredict(float dt) {
     //omegaglob[0] = Winv[0][0]*omega[0] + Winv[0][1]*omega[1] + Winv[0][2]*omega[2];
     //omegaglob[1] = Winv[1][0]*omega[0] + Winv[1][1]*omega[1] + Winv[1][2]*omega[2];
     //omegaglob[2] = Winv[2][0]*omega[0] + Winv[2][1]*omega[1] + Winv[2][2]*omega[2];
-
+    float accglob[3];
+    float omegaglob[3];
     accglob[0] = cosf(sigmaX[6][ii])*cosf(sigmaX[8][ii])*acceleration[0] + (cosf(sigmaX[8][ii])*sinf(sigmaX[7][ii])*sinf(sigmaX[6][ii])-cosf(sigmaX[6][ii])*sinf(sigmaX[8][ii]))*acceleration[1] + (cosf(sigmaX[8][ii])*sinf(sigmaX[7][ii])*sinf(sigmaX[6][ii])+sinf(sigmaX[6][ii])*sinf(sigmaX[8][ii]))*acceleration[2];
     accglob[1] = cosf(sigmaX[6][ii])*sinf(sigmaX[8][ii])*acceleration[0] + (sinf(sigmaX[8][ii])*sinf(sigmaX[7][ii])*sinf(sigmaX[6][ii])+cosf(sigmaX[6][ii])*cosf(sigmaX[8][ii]))*acceleration[1] + (sinf(sigmaX[8][ii])*sinf(sigmaX[7][ii])*cosf(sigmaX[6][ii])-sinf(sigmaX[6][ii])*cosf(sigmaX[8][ii]))*acceleration[2];
     accglob[2] = -sinf(sigmaX[7][ii])*acceleration[0] + cosf(sigmaX[7][ii])*sinf(sigmaX[6][ii])*acceleration[1] + cosf(sigmaX[7][ii])*cosf(sigmaX[6][ii])*acceleration[2] - GRAVITY_MAGNITUDE;
@@ -380,10 +370,12 @@ static void estimatorBoldermanPredict(float dt) {
 // WITH sufficient measurements
 static void estimatorBoldermanDynMeas(void) {
   // Reset ypred
+  float ypred[NOUT];
   for (int ii=0; ii<NOUT; ii++) {
     ypred[ii] = 0.0f;
   }
   // REDIFINE POSITION IN DISTANCE -> measurement equations
+  float sigmaYplus[NOUT][NSIGMA];
   for (int ii=0; ii<NSIGMA; ii++) {
     sigmaYplus[0][ii] = sqrtf((sigmaXplus[0][ii]-anchor[0][0])*(sigmaXplus[0][ii]-anchor[0][0]) + (sigmaXplus[1][ii]-anchor[1][0])*(sigmaXplus[1][ii]-anchor[1][0]) + (sigmaXplus[2][ii]-anchor[2][0])*(sigmaXplus[2][ii]-anchor[2][0]));
     sigmaYplus[1][ii] = sqrtf((sigmaXplus[0][ii]-anchor[0][1])*(sigmaXplus[0][ii]-anchor[0][1]) + (sigmaXplus[1][ii]-anchor[1][1])*(sigmaXplus[1][ii]-anchor[1][1]) + (sigmaXplus[2][ii]-anchor[2][1])*(sigmaXplus[2][ii]-anchor[2][1]));
@@ -393,6 +385,7 @@ static void estimatorBoldermanDynMeas(void) {
     ypred[2] += Wm[ii] * sigmaYplus[2][ii];
   }
   // OUTPUT COVARIANCE -> measurement equations covariance
+  float Pyy[NOUT][NOUT];
   for (int ii=0; ii<NOUT; ii++) {
     for (int jj=0; jj<NOUT; jj++) {
       Pyy[ii][jj] = r[ii][jj];
@@ -402,6 +395,7 @@ static void estimatorBoldermanDynMeas(void) {
     }
   }
   // CROSS COVARIANCE -> state and output covariance
+  float Pxy[N][NOUT];
   for (int ii=0; ii<N; ii++) {
     for (int jj=0; jj<NOUT; jj++) {
       Pxy[ii][jj] = 0.0f;
@@ -431,6 +425,8 @@ static void estimatorBoldermanDynMeas(void) {
   }
   */
   // GAUSSIAN ELIMINATION
+  static float Pyyhelp[NOUT][NOUT];
+  static float Pyyinv[NOUT][NOUT];
   for (int ii=0; ii<NOUT; ii++) {
     for (int jj=0; jj<NOUT; jj++) {
       Pyyhelp[ii][jj] = Pyy[ii][jj];
@@ -441,6 +437,7 @@ static void estimatorBoldermanDynMeas(void) {
   mat_inv(&Pyym, &Pyyinvm);
 
   // KALMAN GAIN -> Kalman gain is given as K=Pxy*inv(Pyy)
+  static float K[N][NOUT];
   for (int ii=0; ii<N; ii++) {
     for (int jj=0; jj<NOUT; jj++) {
       K[ii][jj] = 0.0f;
@@ -452,11 +449,11 @@ static void estimatorBoldermanDynMeas(void) {
   for (int ii=0; ii<NOUT; ii++) {
     for (int jj=0; jj<NOUT; jj++) {
       Pyyinv[ii][jj] = 0.0f;
-      Pyy[ii][jj] = 0.0f;
     }
   }
   // COVARIANCE UPDATE -> Pxxnew = Pxxold - K*Pyy*trans(K) = Pxxold - Pxy*inv(Pyy)*Pyy*trans(K) = Pxxold - Pxy*trans(K)
   // deltaPxx = Pxy*trans(K)
+  float deltaPxx[N][N];
   for (int ii=0; ii<N; ii++) {
     for (int jj=0; jj<N; jj++) {
       deltaPxx[ii][jj] = 0.0f;
@@ -512,6 +509,7 @@ static void estimatorBoldermanStateSave(state_t *state, uint32_t osTick) {
     .z = x[5]
   };
   // ACCELERATION -> GLOBAL FRAME IN UNIT G
+  float accext[3];
   //calculateRgb(x[6], x[7], x[8]);
   //accext[0] = Rgb[0][0]*acceleration[0] + Rgb[1][0]*acceleration[1] + Rgb[2][0]*acceleration[2];
   //accext[1] = Rgb[0][1]*acceleration[0] + Rgb[1][1]*acceleration[1] + Rgb[2][1]*acceleration[2];
@@ -548,34 +546,33 @@ bool estimatorBoldermanEnqueueDistance(distanceMeasurement_t *measurement) {
   return (pdTRUE);
 }
 */
+/*bool estimatorBoldermanIsBusy(void) {
+  return busy;
+}*/
 bool estimatorBoldermanEnqueueDistance(distanceMeasurement_t *measurement) {
   // Only do this after the initialization
-  if (busy) {
-    return (pdTRUE);
-  } else {
-    if (isInit) {
-      // Only use measurement when it is within a reasonable distance
-      if (measurement->distance < MAX_DISTANCE && measurement->distance > MIN_DISTANCE) {
-        // We have the measurement here, use it accordingly:
-        // - if the anchor position is not there yet, put it in
-        // - if the anchor position is there, overwrite the distance (more recent measurements are used)
-        for (int ii=0; ii<3; ii++) {
-          if (measurement->x == anchor[0][ii]
-            && measurement->y == anchor[1][ii]
-            && measurement->z == anchor[2][ii]) {
-              //consolePrintf("Second measurement from same anchor before cleaning \n");
-              y[ii] = measurement->distance;
-              return (pdTRUE);
-          }
+  if (isInit) {
+    // Only use measurement when it is within a reasonable distance
+    if (measurement->distance < MAX_DISTANCE && measurement->distance > MIN_DISTANCE) {
+      // We have the measurement here, use it accordingly:
+      // - if the anchor position is not there yet, put it in
+      // - if the anchor position is there, overwrite the distance (more recent measurements are used)
+      for (int ii=0; ii<3; ii++) {
+        if (measurement->x == anchor[0][ii]
+          && measurement->y == anchor[1][ii]
+          && measurement->z == anchor[2][ii]) {
+            //consolePrintf("Second measurement from same anchor before cleaning \n");
+            y[ii] = measurement->distance;
+            return (pdTRUE);
         }
-        uint32_t yindex = yCount % 3;
-        y[yindex] = measurement->distance;
-        anchor[0][yindex] = measurement->x;
-        anchor[1][yindex] = measurement->y;
-        anchor[2][yindex] = measurement->z;
-        yCount++;
-        return (pdTRUE);
       }
+      uint32_t yindex = yCount % 3;
+      y[yindex] = measurement->distance;
+      anchor[0][yindex] = measurement->x;
+      anchor[1][yindex] = measurement->y;
+      anchor[2][yindex] = measurement->z;
+      yCount++;
+      return (pdTRUE);
     }
   }
   return (pdTRUE);
@@ -795,14 +792,3 @@ LOG_GROUP_START(BOLDERMAN_state)
   LOG_ADD(LOG_FLOAT, pitch_est, &x[7])
   LOG_ADD(LOG_FLOAT, yaw_est, &x[8])
 LOG_GROUP_STOP(BOLDERMAN_state)
-LOG_GROUP_START(BOLDERMAN_meas)
-  LOG_ADD(LOG_FLOAT, covx, &Pxx[0][0])
-  LOG_ADD(LOG_FLOAT, covy, &Pxx[1][1])
-  LOG_ADD(LOG_FLOAT, covz, &Pxx[2][2])
-  LOG_ADD(LOG_FLOAT, covxd, &Pxx[3][3])
-  LOG_ADD(LOG_FLOAT, covyd, &Pxx[4][4])
-  LOG_ADD(LOG_FLOAT, covzd, &Pxx[5][5])
-  LOG_ADD(LOG_FLOAT, covroll, &Pxx[6][6])
-  LOG_ADD(LOG_FLOAT, covpitch, &Pxx[7][7])
-  LOG_ADD(LOG_FLOAT, covyaw, &Pxx[8][8])
-LOG_GROUP_STOP(BOLDERMAN_meas)
